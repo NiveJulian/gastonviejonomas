@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { FinanceProvider } from './context/FinanceContext';
 import { Navbar } from './components/Navbar';
 import type { NavTab } from './components/Navbar';
@@ -16,9 +16,35 @@ import { SettingsModal } from './components/SettingsModal';
 import { FormatDataModal } from './components/FormatDataModal';
 import { ShareAccessModal } from './components/ShareAccessModal';
 import { AiAdvisorChat } from './components/AiAdvisorChat';
+import { LegalDocumentsPage } from './components/LegalDocumentsPage';
 import { Bot, Sparkles } from 'lucide-react';
 
 export function AppContent() {
+  const [currentPath, setCurrentPath] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const p = window.location.pathname.toLowerCase().replace(/\/+$/, '') || '/';
+      return p;
+    }
+    return '/';
+  });
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const p = window.location.pathname.toLowerCase().replace(/\/+$/, '') || '/';
+      setCurrentPath(p);
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  const navigateTo = (path: string) => {
+    if (typeof window !== 'undefined') {
+      window.history.pushState({}, '', path);
+      setCurrentPath(path.toLowerCase().replace(/\/+$/, '') || '/');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  };
+
   const [activeTab, setActiveTab] = useState<NavTab>('dashboard');
   const [isExpenseModalOpen, setIsExpenseModalOpen] = useState(false);
   const [isIncomeModalOpen, setIsIncomeModalOpen] = useState(false);
@@ -49,6 +75,32 @@ export function AppContent() {
   }) => {
     handleOpenExpenseModal(itemData);
   };
+
+  // Rutas legales directas para verificación de Google OAuth
+  if (currentPath === '/privacidad' || currentPath === '/privacy') {
+    return (
+      <LegalDocumentsPage
+        initialTab="privacy"
+        onNavigateHome={() => navigateTo('/')}
+        onNavigateToTab={(tab) => navigateTo(tab === 'privacy' ? '/privacidad' : '/politicas')}
+      />
+    );
+  }
+
+  if (
+    currentPath === '/politicas' ||
+    currentPath === '/terminos' ||
+    currentPath === '/condiciones' ||
+    currentPath === '/terms'
+  ) {
+    return (
+      <LegalDocumentsPage
+        initialTab="terms"
+        onNavigateHome={() => navigateTo('/')}
+        onNavigateToTab={(tab) => navigateTo(tab === 'privacy' ? '/privacidad' : '/politicas')}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col font-sans text-slate-800 relative">
@@ -116,12 +168,27 @@ export function AppContent() {
       {/* Widget Flotante del Chat Asesor IA */}
       <AiAdvisorChat isOpen={isChatOpen} onClose={() => setIsChatOpen(false)} />
 
-      {/* Footer minimalista */}
-      <footer className="border-t border-slate-200 py-6 text-center text-xs text-slate-400 mb-14 md:mb-0">
-        <div className="max-w-7xl mx-auto px-4">
+      {/* Footer con enlaces directos a Privacidad y Términos para verificación de Google */}
+      <footer className="border-t border-slate-200 py-6 text-center text-xs text-slate-500 mb-14 md:mb-0 bg-white">
+        <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-3">
           <p>
             GASTONAPP • Conectado a Google Sheets & Google Drive • Rebalanceo Inteligente & Asesor IA
           </p>
+          <div className="flex items-center gap-3 font-medium text-slate-600">
+            <button
+              onClick={() => navigateTo('/privacidad')}
+              className="hover:text-indigo-600 transition-colors underline cursor-pointer"
+            >
+              Política de Privacidad
+            </button>
+            <span>•</span>
+            <button
+              onClick={() => navigateTo('/politicas')}
+              className="hover:text-indigo-600 transition-colors underline cursor-pointer"
+            >
+              Condiciones del Servicio
+            </button>
+          </div>
         </div>
       </footer>
 

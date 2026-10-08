@@ -537,6 +537,38 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   className="w-full px-3 py-1.5 text-xs rounded-lg border border-slate-200 focus:border-emerald-500 outline-none font-mono"
                 />
               </div>
+
+              {/* Enlaces Legales para Verificación de Google */}
+              <div className="pt-2.5 border-t border-slate-100 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-1 text-[11px] text-slate-500">
+                <span>Seguridad de datos de Google:</span>
+                <div className="flex items-center gap-2 font-medium">
+                  <a
+                    href="/privacidad"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      window.history.pushState({}, '', '/privacidad');
+                      window.dispatchEvent(new PopStateEvent('popstate'));
+                      onClose();
+                    }}
+                    className="text-indigo-600 hover:underline cursor-pointer"
+                  >
+                    Política de Privacidad
+                  </a>
+                  <span>•</span>
+                  <a
+                    href="/politicas"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      window.history.pushState({}, '', '/politicas');
+                      window.dispatchEvent(new PopStateEvent('popstate'));
+                      onClose();
+                    }}
+                    className="text-indigo-600 hover:underline cursor-pointer"
+                  >
+                    Condiciones del Servicio
+                  </a>
+                </div>
+              </div>
             </div>
 
             {/* Sub-bloque 2.2: Conexión alternativa Apps Script Web App */}
