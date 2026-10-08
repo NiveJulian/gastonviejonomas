@@ -1,0 +1,35 @@
+services:
+  gastonapp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gastonapp
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - PORT=3000
+      - NODE_ENV=production
+      # Configuración de Google OAuth 2.0 (obtenida en Google Cloud Console)
+      - VITE_GOOGLE_CLIENT_ID=${VITE_GOOGLE_CLIENT_ID:-}
+      # Configuración del LLM / Agente propio (OpenAI, Ollama, Groq, vLLM, etc.)
+      - VITE_OMNIROUTE_BASE_URL=${VITE_OMNIROUTE_BASE_URL:-}
+      - VITE_OMNIROUTE_API_KEY=${VITE_OMNIROUTE_API_KEY:-}
+      - VITE_OMNIR_MODEL=${VITE_OMNIR_MODEL:-auto/best-fast}
+      # Token del bot de Telegram (@BotFather) para el agente 24/7
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      # Google Apps Script Web App URL (opcional)
+      - VITE_APPS_SCRIPT_URL=${VITE_APPS_SCRIPT_URL:-}
+    volumes:
+      # Volumen persistente para que no se pierdan datos ni configuraciones al hacer push
+      - gaston_data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  gaston_data:
+    driver: local

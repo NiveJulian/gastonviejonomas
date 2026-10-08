@@ -1,13 +1,13 @@
 import type { GoogleUser } from '../types/finance';
+import { getRuntimeEnv } from '../utils/env';
 
 declare const google: any;
 
 const GOOGLE_SESSION_KEY = 'misfinanzas_google_user';
 const GOOGLE_CLIENT_ID_KEY = 'misfinanzas_google_client_id';
 
-// Client ID por defecto (.env o configurable en ajustes)
-export const DEFAULT_CLIENT_ID =
-  (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID || '';
+// Client ID por defecto (variables de entorno de Dokploy o .env local)
+export const DEFAULT_CLIENT_ID = getRuntimeEnv('VITE_GOOGLE_CLIENT_ID');
 
 export function getStoredGoogleClientId(): string {
   const fromStorage = localStorage.getItem(GOOGLE_CLIENT_ID_KEY);
