@@ -17,6 +17,8 @@ import { FormatDataModal } from './components/FormatDataModal';
 import { ShareAccessModal } from './components/ShareAccessModal';
 import { AiAdvisorChat } from './components/AiAdvisorChat';
 import { LegalDocumentsPage } from './components/LegalDocumentsPage';
+import { InstallAppModal } from './components/InstallAppModal';
+import { InstallAppBanner } from './components/InstallAppBanner';
 import { Bot, Sparkles } from 'lucide-react';
 
 export function AppContent() {
@@ -52,6 +54,7 @@ export function AppContent() {
   const [isFormatModalOpen, setIsFormatModalOpen] = useState(false);
   const [isShareModalOpen, setIsShareModalOpen] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
+  const [isInstallModalOpen, setIsInstallModalOpen] = useState(false);
 
   const [expenseInitialData, setExpenseInitialData] = useState<{
     description?: string;
@@ -113,6 +116,7 @@ export function AppContent() {
         onOpenFormatModal={() => setIsFormatModalOpen(true)}
         onOpenEvaluatorModal={() => setActiveTab('evaluator')}
         onOpenShareModal={() => setIsShareModalOpen(true)}
+        onOpenInstallModal={() => setIsInstallModalOpen(true)}
         onToggleChat={() => setIsChatOpen((prev) => !prev)}
         isChatOpen={isChatOpen}
       />
@@ -221,6 +225,13 @@ export function AppContent() {
       <ShareAccessModal
         isOpen={isShareModalOpen}
         onClose={() => setIsShareModalOpen(false)}
+      />
+
+      {/* Banner y Modal de Instalación PWA */}
+      <InstallAppBanner onOpenModal={() => setIsInstallModalOpen(true)} />
+      <InstallAppModal
+        isOpen={isInstallModalOpen}
+        onClose={() => setIsInstallModalOpen(false)}
       />
     </div>
   );

@@ -4,6 +4,7 @@ import type { Expense, Investment, SavingsGoal, AppConfig, GoogleUser, Income } 
 import {
   fetchFromGoogleSheet,
   postExpenseToSheet,
+  postIncomeToSheet,
   postInvestmentToSheet,
   postSavingsToSheet,
   postConfigToSheet,
@@ -19,8 +20,11 @@ import {
   findOrCreateDriveFolder,
   readAllFromGoogleSheetsDirect,
   appendExpenseDirect,
+  appendIncomeDirect,
   appendInvestmentDirect,
   appendSavingsDirect,
+  deleteRowDirect,
+  ensureIncomeSheetExists,
   uploadReceiptToDriveDirect,
   updateConfigDirect,
 } from '../services/googleDirectService';
@@ -189,6 +193,25 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
       if (data.investments && data.investments.length > 0) setInvestments(data.investments);
       if (data.savings && data.savings.length > 0) setSavings(data.savings);
 
+      // Sincronizar Ingresos de Google Sheets y fusionar con datos locales existentes si aplica
+      if (data.incomes && data.incomes.length > 0) {
+        setIncomes((prev) => {
+          const sheetIds = new Set(data.incomes.map((i) => i.id));
+          const localOnly = prev.filter((i) => !sheetIds.has(i.id));
+          if (localOnly.length > 0 && activeToken && targetSheetId) {
+            localOnly.forEach((loc) => {
+              appendIncomeDirect(activeToken, targetSheetId, loc).catch(() => {});
+            });
+          }
+          return [...data.incomes, ...localOnly];
+        });
+      } else if (incomes.length > 0 && activeToken && targetSheetId) {
+        // La hoja en Sheets no tiene filas de ingresos pero tenemos registros locales: migrarlos a Sheets
+        for (const inc of incomes) {
+          appendIncomeDirect(activeToken, targetSheetId, inc).catch(() => {});
+        }
+      }
+
       setConfig((prev) => ({
         ...prev,
         ...data.config,
@@ -226,6 +249,9 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
         config.googleSpreadsheetId
       );
 
+      // Asegurar que la pestaña Ingresos exista
+      await ensureIncomeSheetExists(user.accessToken, spreadsheetId);
+
       setConfig((prev) => ({
         ...prev,
         googleSpreadsheetId: spreadsheetId,
@@ -240,6 +266,9 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
         // Si era nueva, subir los datos iniciales a Sheets
         for (const exp of expenses) {
           await appendExpenseDirect(user.accessToken, spreadsheetId, exp);
+        }
+        for (const inc of incomes) {
+          await appendIncomeDirect(user.accessToken, spreadsheetId, inc);
         }
         for (const inv of investments) {
           await appendInvestmentDirect(user.accessToken, spreadsheetId, inv);
@@ -376,6 +405,11 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
   // Eliminar Gasto
   const deleteExpense = async (id: string) => {
     setExpenses((prev) => prev.filter((e) => e.id !== id));
+    if (googleUser && config.googleSpreadsheetId) {
+      try {
+        await deleteRowDirect(googleUser.accessToken, config.googleSpreadsheetId, 'Gastos', id);
+      } catch {}
+    }
     if (config.appsScriptUrl) {
       try {
         await deleteRowFromSheet(config.appsScriptUrl, 'Gastos', id);
@@ -388,11 +422,46 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
     const id = generateId();
     const newIncome: Income = { ...incomeData, id };
     setIncomes((prev) => [newIncome, ...prev]);
+
+    // Flujo 1: Sincronización directa vía Google Sheets API (OAuth)
+    if (googleUser && config.googleSpreadsheetId) {
+      setIsSyncing(true);
+      try {
+        await appendIncomeDirect(googleUser.accessToken, config.googleSpreadsheetId, newIncome);
+      } catch (err: any) {
+        console.warn('Error guardando ingreso en Google Sheets directo:', err.message);
+      } finally {
+        setIsSyncing(false);
+      }
+      return;
+    }
+
+    // Flujo 2: Vía Google Apps Script si está configurado
+    if (config.appsScriptUrl) {
+      setIsSyncing(true);
+      try {
+        await postIncomeToSheet(config.appsScriptUrl, newIncome);
+      } catch (err: any) {
+        console.warn('Error guardando ingreso en Apps Script:', err.message);
+      } finally {
+        setIsSyncing(false);
+      }
+    }
   };
 
   // Eliminar Ingreso
   const deleteIncome = async (id: string) => {
     setIncomes((prev) => prev.filter((i) => i.id !== id));
+    if (googleUser && config.googleSpreadsheetId) {
+      try {
+        await deleteRowDirect(googleUser.accessToken, config.googleSpreadsheetId, 'Ingresos', id);
+      } catch {}
+    }
+    if (config.appsScriptUrl) {
+      try {
+        await deleteRowFromSheet(config.appsScriptUrl, 'Ingresos', id);
+      } catch {}
+    }
   };
 
   // Agregar Inversión
@@ -418,6 +487,11 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
   // Eliminar Inversión
   const deleteInvestment = async (id: string) => {
     setInvestments((prev) => prev.filter((i) => i.id !== id));
+    if (googleUser && config.googleSpreadsheetId) {
+      try {
+        await deleteRowDirect(googleUser.accessToken, config.googleSpreadsheetId, 'Inversiones', id);
+      } catch {}
+    }
     if (config.appsScriptUrl) {
       try {
         await deleteRowFromSheet(config.appsScriptUrl, 'Inversiones', id);
@@ -468,6 +542,11 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
   // Eliminar Meta de Ahorro
   const deleteSavingsGoal = async (id: string) => {
     setSavings((prev) => prev.filter((s) => s.id !== id));
+    if (googleUser && config.googleSpreadsheetId) {
+      try {
+        await deleteRowDirect(googleUser.accessToken, config.googleSpreadsheetId, 'Ahorros', id);
+      } catch {}
+    }
     if (config.appsScriptUrl) {
       try {
         await deleteRowFromSheet(config.appsScriptUrl, 'Ahorros', id);

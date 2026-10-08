@@ -25,6 +25,7 @@ import {
   Send,
   ArrowUpRight,
   Trash2,
+  Download,
 } from 'lucide-react';
 import { useFinance } from '../context/FinanceContext';
 import { formatMoney } from '../utils/helpers';
@@ -49,6 +50,7 @@ interface NavbarProps {
   onOpenFormatModal: () => void;
   onOpenEvaluatorModal: () => void;
   onOpenShareModal: () => void;
+  onOpenInstallModal: () => void;
   onToggleChat: () => void;
   isChatOpen: boolean;
 }
@@ -62,6 +64,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenFormatModal,
   onOpenEvaluatorModal,
   onOpenShareModal,
+  onOpenInstallModal,
   onToggleChat,
   isChatOpen,
 }) => {
@@ -450,6 +453,17 @@ export const Navbar: React.FC<NavbarProps> = ({
                         <span>Ajustes & Parámetros</span>
                       </button>
 
+                      <button
+                        onClick={() => {
+                          setIsAccountMenuOpen(false);
+                          onOpenInstallModal();
+                        }}
+                        className="w-full px-3.5 py-2 text-left hover:bg-emerald-50 text-emerald-800 flex items-center gap-2 transition-colors font-medium"
+                      >
+                        <Download className="w-4 h-4 text-emerald-600" />
+                        <span>Instalar en el Celular</span>
+                      </button>
+
                       <div className="pt-1 mt-1 border-t border-slate-100">
                         <button
                           onClick={() => {
@@ -659,6 +673,17 @@ export const Navbar: React.FC<NavbarProps> = ({
                     >
                       <Settings className="w-4 h-4 text-slate-500" />
                       <span>Ajustes & Parámetros</span>
+                    </button>
+
+                    <button
+                      onClick={() => {
+                        setIsSidebarOpen(false);
+                        onOpenInstallModal();
+                      }}
+                      className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-semibold text-emerald-800 bg-emerald-50/80 hover:bg-emerald-100 border border-emerald-200/60 transition-colors"
+                    >
+                      <Download className="w-4 h-4 text-emerald-600" />
+                      <span>Instalar en el Celular</span>
                     </button>
 
                     <button
