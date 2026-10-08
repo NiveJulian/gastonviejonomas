@@ -1,7 +1,96 @@
-import type { Expense, Investment, SavingsGoal, AppConfig, DrivePermission } from '../types/finance';
+import type { Expense, Income, Investment, SavingsGoal, AppConfig, DrivePermission } from '../types/finance';
 
 const SPREADSHEET_NAME = 'FinanzaHogar - Mis Finanzas';
 const DRIVE_FOLDER_NAME = 'Comprobantes Finanzas';
+
+/**
+ * Verifica si existe la pestaña 'Ingresos' en la hoja de cálculo.
+ * Si no existe (creada en versiones anteriores), la agrega automáticamente con sus encabezados.
+ */
+export async function ensureIncomeSheetExists(
+  accessToken: string,
+  spreadsheetId: string
+): Promise<void> {
+  try {
+    const metaUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties(sheetId,title)`;
+    const metaRes = await fetch(metaUrl, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+
+    if (!metaRes.ok) return;
+
+    const meta = await metaRes.json();
+    const sheetsList = meta.sheets || [];
+    const hasIncomeSheet = sheetsList.some(
+      (s: any) => s.properties?.title?.toLowerCase() === 'ingresos'
+    );
+
+    if (hasIncomeSheet) {
+      return;
+    }
+
+    // Crear pestaña 'Ingresos'
+    const addSheetRes = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          requests: [
+            {
+              addSheet: {
+                properties: {
+                  title: 'Ingresos',
+                  gridProperties: { frozenRowCount: 1 },
+                },
+              },
+            },
+          ],
+        }),
+      }
+    );
+
+    if (!addSheetRes.ok) return;
+
+    // Agregar encabezados de Ingresos
+    const headersPayload = {
+      valueInputOption: 'USER_ENTERED',
+      data: [
+        {
+          range: 'Ingresos!A1:G1',
+          values: [
+            [
+              'ID',
+              'Fecha',
+              'Descripción',
+              'Categoría',
+              'Monto',
+              'Método de Cobro',
+              'Notas',
+            ],
+          ],
+        },
+      ],
+    };
+
+    await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchUpdate`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(headersPayload),
+      }
+    );
+  } catch (err) {
+    console.warn('[GoogleDirectService] Error asegurando pestaña Ingresos:', err);
+  }
+}
 
 /**
  * Busca o crea la carpeta de comprobantes en Google Drive
@@ -68,6 +157,7 @@ export async function findOrCreateSpreadsheet(
     if (checkRes.ok) {
       const data = await checkRes.json();
       if (!data.trashed) {
+        await ensureIncomeSheetExists(accessToken, storedSpreadsheetId);
         return { spreadsheetId: storedSpreadsheetId, isNew: false };
       }
     }
@@ -84,7 +174,9 @@ export async function findOrCreateSpreadsheet(
   if (searchRes.ok) {
     const data = await searchRes.json();
     if (data.files && data.files.length > 0) {
-      return { spreadsheetId: data.files[0].id, isNew: false };
+      const foundId = data.files[0].id;
+      await ensureIncomeSheetExists(accessToken, foundId);
+      return { spreadsheetId: foundId, isNew: false };
     }
   }
 
@@ -98,6 +190,12 @@ export async function findOrCreateSpreadsheet(
       {
         properties: {
           title: 'Gastos',
+          gridProperties: { frozenRowCount: 1 },
+        },
+      },
+      {
+        properties: {
+          title: 'Ingresos',
           gridProperties: { frozenRowCount: 1 },
         },
       },
@@ -155,6 +253,20 @@ export async function findOrCreateSpreadsheet(
             'Monto',
             'Método de Pago',
             'URL Comprobante',
+            'Notas',
+          ],
+        ],
+      },
+      {
+        range: 'Ingresos!A1:G1',
+        values: [
+          [
+            'ID',
+            'Fecha',
+            'Descripción',
+            'Categoría',
+            'Monto',
+            'Método de Cobro',
             'Notas',
           ],
         ],
@@ -220,11 +332,21 @@ export async function readAllFromGoogleSheetsDirect(
   spreadsheetId: string
 ): Promise<{
   expenses: Expense[];
+  incomes: Income[];
   investments: Investment[];
   savings: SavingsGoal[];
   config: Partial<AppConfig>;
 }> {
-  const ranges = ['Gastos!A2:I', 'Inversiones!A2:H', 'Ahorros!A2:G', 'Configuracion!A2:B'];
+  // Asegurar que la pestaña Ingresos exista si la hoja proviene de una versión previa
+  await ensureIncomeSheetExists(accessToken, spreadsheetId);
+
+  const ranges = [
+    'Gastos!A2:I',
+    'Inversiones!A2:H',
+    'Ahorros!A2:G',
+    'Configuracion!A2:B',
+    'Ingresos!A2:G',
+  ];
   const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchGet?${ranges
     .map((r) => `ranges=${encodeURIComponent(r)}`)
     .join('&')}`;
@@ -295,8 +417,23 @@ export async function readAllFromGoogleSheetsDirect(
     }
   });
 
+  // 5. Ingresos
+  const incomesRows = valueRanges[4]?.values || [];
+  const incomes: Income[] = incomesRows
+    .filter((row: any[]) => row && (row[0] || row[1] || row[2]))
+    .map((row: any[]) => ({
+      id: String(row[0] || Math.random().toString(36).substring(2, 9)),
+      date: String(row[1] || new Date().toISOString().split('T')[0]),
+      description: String(row[2] || 'Ingreso'),
+      category: String(row[3] || 'Otros Ingresos'),
+      amount: parseFloat(String(row[4]).replace(/[^0-9.-]+/g, '')) || 0,
+      paymentMethod: row[5] ? String(row[5]) : undefined,
+      notes: row[6] ? String(row[6]) : undefined,
+    }));
+
   return {
     expenses,
+    incomes,
     investments,
     savings,
     config: {
@@ -365,6 +502,98 @@ export async function appendExpenseDirect(
     },
     body: JSON.stringify({ values: [row] }),
   });
+}
+
+/**
+ * Agrega un ingreso directamente a Google Sheets
+ */
+export async function appendIncomeDirect(
+  accessToken: string,
+  spreadsheetId: string,
+  income: Income
+): Promise<void> {
+  await ensureIncomeSheetExists(accessToken, spreadsheetId);
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Ingresos!A:G:append?valueInputOption=USER_ENTERED`;
+  const row = [
+    income.id,
+    income.date,
+    income.description,
+    income.category,
+    income.amount,
+    income.paymentMethod || '',
+    income.notes || '',
+  ];
+
+  await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ values: [row] }),
+  });
+}
+
+/**
+ * Elimina directamente una fila por ID en la pestaña especificada de Google Sheets
+ */
+export async function deleteRowDirect(
+  accessToken: string,
+  spreadsheetId: string,
+  sheetTitle: string,
+  id: string
+): Promise<void> {
+  try {
+    const metaUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties(sheetId,title)`;
+    const metaRes = await fetch(metaUrl, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!metaRes.ok) return;
+
+    const meta = await metaRes.json();
+    const targetSheet = (meta.sheets || []).find(
+      (s: any) => s.properties?.title?.toLowerCase() === sheetTitle.toLowerCase()
+    );
+    if (!targetSheet) return;
+
+    const numericSheetId = targetSheet.properties.sheetId;
+
+    const valuesUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(sheetTitle)}!A:A`;
+    const valuesRes = await fetch(valuesUrl, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!valuesRes.ok) return;
+
+    const valuesData = await valuesRes.json();
+    const rows = valuesData.values || [];
+    const rowIndex = rows.findIndex((r: any[]) => r && String(r[0]).trim() === String(id).trim());
+
+    if (rowIndex === -1) return;
+
+    await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        requests: [
+          {
+            deleteDimension: {
+              range: {
+                sheetId: numericSheetId,
+                dimension: 'ROWS',
+                startIndex: rowIndex,
+                endIndex: rowIndex + 1,
+              },
+            },
+          },
+        ],
+      }),
+    });
+  } catch (err) {
+    console.warn(`[GoogleDirectService] Error eliminando fila ${id} de ${sheetTitle}:`, err);
+  }
 }
 
 /**

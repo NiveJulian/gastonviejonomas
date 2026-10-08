@@ -1,7 +1,8 @@
-import type { Expense, Investment, SavingsGoal, AppConfig } from '../types/finance';
+import type { Expense, Income, Investment, SavingsGoal, AppConfig } from '../types/finance';
 
 export interface SheetFullData {
   expenses: Expense[];
+  incomes: Income[];
   investments: Investment[];
   savings: SavingsGoal[];
   config: Partial<AppConfig>;
@@ -33,6 +34,10 @@ export async function fetchFromGoogleSheet(apiUrl: string): Promise<SheetFullDat
     expenses: (result.data.expenses || []).map((e: any) => ({
       ...e,
       amount: Number(e.amount) || 0,
+    })),
+    incomes: (result.data.incomes || []).map((i: any) => ({
+      ...i,
+      amount: Number(i.amount) || 0,
     })),
     investments: (result.data.investments || []).map((i: any) => ({
       ...i,
@@ -97,6 +102,43 @@ export async function postExpenseToSheet(
   return {
     id: result.id || expense.id,
     receiptUrl: result.receiptUrl || '',
+  };
+}
+
+/**
+ * Guarda un ingreso en Google Sheets vía Apps Script
+ */
+export async function postIncomeToSheet(apiUrl: string, income: Income): Promise<{ id: string }> {
+  if (!apiUrl) {
+    return { id: income.id };
+  }
+
+  const payload = {
+    action: 'ADD_INCOME',
+    id: income.id,
+    date: income.date,
+    description: income.description,
+    category: income.category,
+    amount: income.amount,
+    paymentMethod: income.paymentMethod || '',
+    notes: income.notes || '',
+  };
+
+  const response = await fetch(apiUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'text/plain;charset=utf-8',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const result = await response.json();
+  if (result.status !== 'success') {
+    throw new Error(result.message || 'Error al guardar el ingreso en Google Sheets');
+  }
+
+  return {
+    id: result.id || income.id,
   };
 }
 
