@@ -1,4 +1,4 @@
-# 💰 FinanzaHogar: Control de Gastos, Inversiones y Ahorros con Validador Inteligente & Asesor IA
+# 💰 GASTONAPP: Control de Gastos, Inversiones y Ahorros con Validador Inteligente & Asesor IA
 
 Una aplicación web moderna, ágil y visualmente atractiva para el control de la economía de tu casa, sincronizada con **Google Sheets** como base de datos y **Google Drive** para almacenar las fotos de facturas y tickets de comprobantes, complementada con un **Asesor Financiero IA conectado a Omniroute LLM**.
 
