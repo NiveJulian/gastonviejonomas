@@ -39,6 +39,7 @@ const MIME_TYPES = {
   '.mjs': 'application/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
@@ -205,11 +206,14 @@ const server = http.createServer((req, res) => {
       const ext = path.extname(filePath).toLowerCase();
       const contentType = MIME_TYPES[ext] || 'application/octet-stream';
 
-      // Cache prolongado para assets versionados con hash
+      // Cache prolongado para assets con hash; sw.js sin cache para actualizaciones inmediatas
       const isHashedAsset = pathname.startsWith('/assets/');
+      const isServiceWorker = pathname === '/sw.js';
       const cacheControl = isHashedAsset
         ? 'public, max-age=31536000, immutable'
-        : 'public, max-age=3600';
+        : isServiceWorker
+          ? 'no-cache, no-store, must-revalidate'
+          : 'public, max-age=3600';
 
       res.writeHead(200, {
         'Content-Type': contentType,
