@@ -1,0 +1,12 @@
+{
+  "name": "finanzahogar-telegram-bot",
+  "version": "1.0.0",
+  "description": "Bot de Telegram para control de finanzas personales conectado a Google Sheets y Omniroute",
+  "type": "module",
+  "scripts": {
+    "start": "node bot.mjs"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7"
+  }
+}
