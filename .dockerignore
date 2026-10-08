@@ -1,0 +1,33 @@
+# Dependencias y compilados
+node_modules
+dist
+dist-ssr
+
+# Control de versiones
+.git
+.github
+
+# Secretos y variables locales
+.env
+.env.local
+.env.*.local
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Editores y sistema
+.DS_Store
+.idea
+.vscode
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Datos locales temporales
+data

@@ -3,6 +3,7 @@ import { calculateFinancialTotals } from '../utils/rulesEngine';
 import { calculateComfortAnalysis } from '../utils/comfortCalculator';
 import { detectCategoryGaps, generateAllocationProposal } from '../utils/fundAllocator';
 import { formatMoney } from '../utils/helpers';
+import { getRuntimeEnv } from '../utils/env';
 
 /**
  * Limpia asteriscos de negrita (**) y emojis de cualquier texto
@@ -268,16 +269,15 @@ export async function askFinancialAdvisor(
   // 1. INTENTO CON LLM PROPIO / OMNIROUTE / OPENAI / GROQ / OPENROUTER / OLLAMA
   const omnirouteBaseUrl =
     config.omnirouteBaseUrl?.trim() ||
-    ((import.meta as any).env?.VITE_OMNIROUTE_BASE_URL || '').trim();
+    getRuntimeEnv('VITE_OMNIROUTE_BASE_URL');
 
   const omnirouteApiKey =
     config.omnirouteApiKey?.trim() ||
-    ((import.meta as any).env?.VITE_OMNIROUTE_API_KEY || '').trim();
+    getRuntimeEnv('VITE_OMNIROUTE_API_KEY');
 
   const omnirouteModel =
     config.omnirouteModel?.trim() ||
-    ((import.meta as any).env?.VITE_OMNIR_MODEL || '').trim() ||
-    'auto/best-fast';
+    getRuntimeEnv('VITE_OMNIR_MODEL', 'auto/best-fast');
 
   if (omnirouteBaseUrl) {
     try {
