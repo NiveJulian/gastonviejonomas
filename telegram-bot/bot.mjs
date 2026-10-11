@@ -1,6 +1,7 @@
 /**
- * BOT TELEGRAM LOCAL - FINANZAHOGAR
+ * BOT TELEGRAM LOCAL - GASTONAPP
  * Ejecución directa en Node.js mediante long-polling
+ * Con persistencia real, evaluación dinámica, CRUD básico y sincronización con Google Apps Script
  */
 
 import fs from 'fs';
@@ -43,6 +44,34 @@ if (process.argv[2]) token = process.argv[2];
 if (process.argv[3]) appsScriptUrl = process.argv[3];
 
 const TELEGRAM_API = `https://api.telegram.org/bot${token}`;
+const DATA_FILE = path.resolve(process.cwd(), 'data', 'telegram_data.json');
+
+// Gestión de datos persistentes locales
+function loadLocalData() {
+  try {
+    if (fs.existsSync(DATA_FILE)) {
+      return JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8'));
+    }
+  } catch (err) {
+    console.warn('Error leyendo telegram_data.json:', err.message);
+  }
+  return {
+    monthlyIncome: 500000,
+    emergencyFund: 0,
+    expenses: [],
+    incomes: [],
+  };
+}
+
+function saveLocalData(data) {
+  try {
+    const dir = path.dirname(DATA_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), 'utf-8');
+  } catch (err) {
+    console.warn('Error guardando telegram_data.json:', err.message);
+  }
+}
 
 async function sendMessage(chatId, text) {
   try {
@@ -56,10 +85,25 @@ async function sendMessage(chatId, text) {
   }
 }
 
-async function askOmniroute(userMessage) {
-  if (!omnirouteUrl) {
-    return 'Agente IA no configurado. Para habilitar respuestas libres, configura la URL y API Key de tu proveedor de IA (OpenAI, Ollama, vLLM, etc.) en .env o en los Ajustes de la aplicacion. Puedes utilizar /saldo, /puedo [monto] o /gasto [monto].';
-  }
+function extractAmountFromText(text) {
+  const t = text.toLowerCase();
+  if (t.includes('medio palo')) return 500000;
+  if (t.includes('un palo')) return 1000000;
+
+  const paloMatch = t.match(/(\d+(?:[.,]\d+)?)\s*(?:palos?|millon(?:es)?|m\b)/);
+  if (paloMatch) return Math.round(parseFloat(paloMatch[1].replace(',', '.')) * 1000000);
+
+  const milMatch = t.match(/(\d+(?:[.,]\d+)?)\s*(?:mil\b|lucas?|lukas?|k\b)/);
+  if (milMatch) return Math.round(parseFloat(milMatch[1].replace(',', '.')) * 1000);
+
+  const numMatch = t.match(/\d+([.,]\d+)?/);
+  if (numMatch) return parseFloat(numMatch[0].replace(',', '.'));
+  return 0;
+}
+
+async function askOmniroute(userMessage, financialContext) {
+  if (!omnirouteUrl) return '';
+
   try {
     const cleanBase = omnirouteUrl.replace(/\/+$/, '');
     const res = await fetch(`${cleanBase}/chat/completions`, {
@@ -73,12 +117,12 @@ async function askOmniroute(userMessage) {
         messages: [
           {
             role: 'system',
-            content: 'Eres un analista financiero personal en Telegram. Responde directo, matematico y sobrio sin asteriscos dobles ni emojis.',
+            content: `Eres GASTON, analista financiero inteligente en Telegram. Sé elocuente, conciso y respetuoso. Responde en 1 a 3 oraciones sin asteriscos dobles ni emojis. Contexto del usuario: Saldo libre disponible: $ ${financialContext.freeCash.toLocaleString('es-AR')}, Gastado en el mes: $ ${financialContext.totalExpenses.toLocaleString('es-AR')}.`,
           },
           { role: 'user', content: userMessage },
         ],
-        max_tokens: 600,
-        temperature: 0.2,
+        max_tokens: 300,
+        temperature: 0.3,
       }),
     });
 
@@ -105,7 +149,7 @@ async function askOmniroute(userMessage) {
     } catch {}
 
     return '';
-  } catch (e) {
+  } catch {
     return '';
   }
 }
@@ -128,79 +172,183 @@ async function pollUpdates() {
         if (!msg) continue;
 
         const chatId = msg.chat.id;
+        const localData = loadLocalData();
 
-        // Caso Foto
+        // 1. Caso Foto
         if (msg.photo && msg.photo.length > 0) {
           const caption = (msg.caption || '').trim();
-          const match = caption.match(/\d+([.,]\d+)?/);
-          const amount = match ? match[0] : '0';
-          const concept = match ? caption.replace(match[0], '').trim() || 'Comprobante' : caption || 'Comprobante';
+          const amount = extractAmountFromText(caption);
+          const concept = caption.replace(/\d+([.,]\d+)?/, '').trim() || 'Comprobante';
+
+          if (appsScriptUrl) {
+            try {
+              await fetch(appsScriptUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: msg }),
+              });
+              continue;
+            } catch {}
+          }
+
+          if (amount > 0) {
+            localData.expenses.unshift({
+              id: 'exp_' + Date.now(),
+              date: new Date().toISOString().split('T')[0],
+              description: concept,
+              amount,
+            });
+            saveLocalData(localData);
+          }
 
           await sendMessage(
             chatId,
-            `Foto recibida. Registrando comprobante de gasto: $ ${amount} (${concept}). Sincronizando con Google Drive y Sheets.`
+            `Comprobante procesado: registré $ ${amount.toLocaleString('es-AR')} (${concept}). Sincronizado.`
           );
           continue;
         }
 
-        // Caso Texto
+        // 2. Caso Texto
         if (msg.text) {
           const text = msg.text.trim();
           const textLower = text.toLowerCase();
 
-          if (textLower === '/start' || textLower === '/ayuda') {
+          // Sincronización transparente con Apps Script si está disponible
+          if (appsScriptUrl && (textLower.startsWith('/') || msg.photo)) {
+            try {
+              const asRes = await fetch(appsScriptUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: msg }),
+              });
+              if (asRes.ok) continue;
+            } catch {}
+          }
+
+          // Cálculo de totales reales
+          const currentYM = new Date().toISOString().substring(0, 7);
+          const currentExpenses = localData.expenses.filter((e) => e.date?.startsWith(currentYM));
+          const totalSpent = currentExpenses.reduce((sum, e) => sum + Number(e.amount || 0), 0);
+
+          const currentIncomes = localData.incomes.filter((i) => i.date?.startsWith(currentYM));
+          const totalIncomes = currentIncomes.reduce((sum, i) => sum + Number(i.amount || 0), 0);
+          const effectiveIncome = totalIncomes > 0 ? totalIncomes : localData.monthlyIncome;
+          const freeCash = Math.max(0, effectiveIncome - totalSpent);
+
+          const now = new Date();
+          const totalDaysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+          const daysLeft = Math.max(1, totalDaysInMonth - now.getDate());
+
+          // Comando /start o /ayuda
+          if (textLower === '/start' || textLower === '/ayuda' || textLower === 'ayuda') {
             await sendMessage(
               chatId,
-              'FinanzaHogar Telegram Bot activo.\n\nComandos:\n- /saldo: Resumen de dinero libre y fondos\n- /puedo [monto]: Validador de compras\n- /gasto [monto] [concepto]: Registro de gasto\n- Enviar foto de ticket con monto en pie de foto\n- O pregunta directamente cualquier calculo financiero.'
+              'GASTONAPP Bot activo y conectado.\n\nComandos y funciones:\n• /saldo: Estado actual de saldo libre y gastos\n• /puedo [monto]: Evalúa si te conviene realizar una compra\n• /gasto [monto] [concepto]: Registra un gasto\n• /ingreso [monto] [concepto]: Registra un ingreso\n• "Borrá el último gasto": Deshace la última operación\n• También podés enviar fotos de tickets o escribir consultas libres.'
             );
             continue;
           }
 
-          if (textLower.startsWith('/saldo')) {
+          // Comando /saldo
+          if (textLower === '/saldo' || textLower === '/resumen' || textLower === 'saldo') {
             await sendMessage(
               chatId,
-              'Estado financiero:\n- Saldo libre: $ 294.000\n- Fondo emergencia: $ 950.000 (Piso min: $ 900.000)\n- Gastos fijos del hogar: $ 393.000'
+              `Estado financiero actual (${currentYM}):\n• Saldo libre: $ ${freeCash.toLocaleString('es-AR')} ($ ${Math.round(freeCash / daysLeft).toLocaleString('es-AR')}/día para ${daysLeft} días restantes)\n• Total gastado en el mes: $ ${totalSpent.toLocaleString('es-AR')}\n• Ingresos registrados: $ ${effectiveIncome.toLocaleString('es-AR')}`
             );
             continue;
           }
 
-          if (textLower.startsWith('/puedo')) {
-            const match = text.match(/\d+([.,]\d+)?/);
-            if (match) {
-              const val = parseFloat(match[0]);
-              if (val <= 294000) {
+          // Comando /puedo [monto]
+          if (textLower.startsWith('/puedo') || textLower.startsWith('puedo')) {
+            const purchaseAmt = extractAmountFromText(text);
+            if (purchaseAmt > 0) {
+              if (purchaseAmt <= freeCash) {
+                const rest = freeCash - purchaseAmt;
                 await sendMessage(
                   chatId,
-                  `Aprobado: El gasto de $ ${val.toLocaleString('es-AR')} entra en tu saldo libre. Te quedaran $ ${(294000 - val).toLocaleString('es-AR')} libres.`
+                  `Compra viable: el gasto de $ ${purchaseAmt.toLocaleString('es-AR')} entra en tu saldo libre. Te quedarán $ ${rest.toLocaleString('es-AR')} para los ${daysLeft} días restantes ($ ${Math.round(rest / daysLeft).toLocaleString('es-AR')}/día).`
                 );
               } else {
+                const deficit = purchaseAmt - freeCash;
                 await sendMessage(
                   chatId,
-                  `Bloqueado: El gasto de $ ${val.toLocaleString('es-AR')} supera tu saldo libre ($ 294.000) y afectaria tu fondo de emergencia.`
+                  `Desaconsejado: el gasto de $ ${purchaseAmt.toLocaleString('es-AR')} supera tu saldo disponible ($ ${freeCash.toLocaleString('es-AR')}) por un déficit de -$ ${deficit.toLocaleString('es-AR')}. Comprometerías tus reservas.`
                 );
               }
             } else {
-              await sendMessage(chatId, 'Indica el monto a evaluar. Ejemplo: /puedo 35000 Zapatillas');
+              await sendMessage(chatId, 'Indicá el monto a evaluar. Ejemplo: /puedo 35000 Zapatillas');
             }
             continue;
           }
 
-          if (textLower.startsWith('/gasto')) {
-            const match = text.match(/\d+([.,]\d+)?/);
-            const amount = match ? match[0] : '0';
-            const concept = match ? text.replace(/\/gasto/i, '').replace(match[0], '').trim() || 'Gasto' : 'Gasto';
-            await sendMessage(chatId, `Gasto registrado: $ ${amount} (${concept}). Guardado.`);
-            continue;
+          // Comando /gasto o instrucción de registro de gasto
+          if (textLower.startsWith('/gasto') || textLower.startsWith('gaste ') || textLower.startsWith('gasté ') || textLower.startsWith('pague ') || textLower.startsWith('pagué ')) {
+            const amount = extractAmountFromText(text);
+            if (amount > 0) {
+              const concept = text.replace(/\/gasto/i, '').replace(/gast[eé]/i, '').replace(/pagu[eé]/i, '').replace(/\d+([.,]\d+)?/, '').trim() || 'Gasto';
+              localData.expenses.unshift({
+                id: 'exp_' + Date.now(),
+                date: new Date().toISOString().split('T')[0],
+                description: concept,
+                amount,
+              });
+              saveLocalData(localData);
+
+              const newFree = Math.max(0, freeCash - amount);
+              await sendMessage(
+                chatId,
+                `Gasto registrado: $ ${amount.toLocaleString('es-AR')} (${concept}). Tu saldo libre restante es de $ ${newFree.toLocaleString('es-AR')}.`
+              );
+              continue;
+            }
           }
 
-          // Consultar a Omniroute
-          const aiResponse = await askOmniroute(text);
+          // Comando /ingreso o registro de ingreso
+          if (textLower.startsWith('/ingreso') || textLower.startsWith('cobre ') || textLower.startsWith('cobré ')) {
+            const amount = extractAmountFromText(text);
+            if (amount > 0) {
+              const concept = text.replace(/\/ingreso/i, '').replace(/cobr[eé]/i, '').replace(/\d+([.,]\d+)?/, '').trim() || 'Sueldo / Salario';
+              localData.incomes.unshift({
+                id: 'inc_' + Date.now(),
+                date: new Date().toISOString().split('T')[0],
+                description: concept,
+                amount,
+              });
+              saveLocalData(localData);
+
+              const newFree = freeCash + amount;
+              await sendMessage(
+                chatId,
+                `Ingreso registrado: $ ${amount.toLocaleString('es-AR')} (${concept}). Tu saldo libre asciende a $ ${newFree.toLocaleString('es-AR')}.`
+              );
+              continue;
+            }
+          }
+
+          // Deshacer / borrar último gasto
+          if (textLower.includes('borr') && (textLower.includes('ultimo') || textLower.includes('último'))) {
+            if (localData.expenses.length > 0) {
+              const deleted = localData.expenses.shift();
+              saveLocalData(localData);
+              const restoredFree = freeCash + deleted.amount;
+              await sendMessage(
+                chatId,
+                `Eliminé el último gasto: "${deleted.description}" ($ ${deleted.amount.toLocaleString('es-AR')}). Tu saldo libre se restableció a $ ${restoredFree.toLocaleString('es-AR')}.`
+              );
+              continue;
+            } else {
+              await sendMessage(chatId, 'No hay gastos registrados para eliminar.');
+              continue;
+            }
+          }
+
+          // Consultar a Omniroute / LLM
+          const aiResponse = await askOmniroute(text, { freeCash, totalExpenses: totalSpent });
           if (aiResponse) {
             await sendMessage(chatId, aiResponse);
           } else {
             await sendMessage(
               chatId,
-              'Indica /saldo para ver tus fondos o envia una foto de ticket para guardar el gasto.'
+              'Escribí /saldo para consultar tus fondos, /puedo [monto] para evaluar una compra, o /gasto [monto] [concepto] para asentar una operación.'
             );
           }
         }

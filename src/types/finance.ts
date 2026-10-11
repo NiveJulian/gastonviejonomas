@@ -196,4 +196,6 @@ export interface ChatMessage {
   text: string;
   timestamp: string;
   isStreaming?: boolean;
+  actionBadge?: string;
+  actionType?: string;
 }

@@ -31,6 +31,7 @@ import {
 import { generateId, getCurrentYearMonth } from '../utils/helpers';
 import { startBrowserTelegramBot, stopBrowserTelegramBot } from '../services/browserTelegramBot';
 import { askFinancialAdvisor } from '../services/geminiService';
+import { processAgentInstruction } from '../services/agentEngine';
 
 interface FinanceContextType {
   expenses: Expense[];
@@ -49,8 +50,10 @@ interface FinanceContextType {
     receiptBase64?: string,
     receiptFilename?: string
   ) => Promise<void>;
+  updateExpense: (id: string, updated: Partial<Expense>) => Promise<void>;
   deleteExpense: (id: string) => Promise<void>;
   addIncome: (income: Omit<Income, 'id'>) => Promise<void>;
+  updateIncome: (id: string, updated: Partial<Income>) => Promise<void>;
   deleteIncome: (id: string) => Promise<void>;
   addInvestment: (investment: Omit<Investment, 'id'>) => Promise<void>;
   deleteInvestment: (id: string) => Promise<void>;
@@ -402,6 +405,34 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
     }
   };
 
+  // Actualizar Gasto
+  const updateExpense = async (id: string, updated: Partial<Expense>) => {
+    let updatedItem: Expense | undefined;
+    setExpenses((prev) =>
+      prev.map((e) => {
+        if (e.id === id) {
+          updatedItem = { ...e, ...updated };
+          return updatedItem;
+        }
+        return e;
+      })
+    );
+
+    if (googleUser && config.googleSpreadsheetId && updatedItem) {
+      try {
+        await deleteRowDirect(googleUser.accessToken, config.googleSpreadsheetId, 'Gastos', id);
+        await appendExpenseDirect(
+          googleUser.accessToken,
+          config.googleSpreadsheetId,
+          updatedItem,
+          updatedItem.receiptUrl
+        );
+      } catch (err) {
+        console.warn('Error actualizando gasto en Google Sheets:', err);
+      }
+    }
+  };
+
   // Eliminar Gasto
   const deleteExpense = async (id: string) => {
     setExpenses((prev) => prev.filter((e) => e.id !== id));
@@ -445,6 +476,29 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
         console.warn('Error guardando ingreso en Apps Script:', err.message);
       } finally {
         setIsSyncing(false);
+      }
+    }
+  };
+
+  // Actualizar Ingreso
+  const updateIncome = async (id: string, updated: Partial<Income>) => {
+    let updatedItem: Income | undefined;
+    setIncomes((prev) =>
+      prev.map((i) => {
+        if (i.id === id) {
+          updatedItem = { ...i, ...updated };
+          return updatedItem;
+        }
+        return i;
+      })
+    );
+
+    if (googleUser && config.googleSpreadsheetId && updatedItem) {
+      try {
+        await deleteRowDirect(googleUser.accessToken, config.googleSpreadsheetId, 'Ingresos', id);
+        await appendIncomeDirect(googleUser.accessToken, config.googleSpreadsheetId, updatedItem);
+      } catch (err) {
+        console.warn('Error actualizando ingreso en Google Sheets:', err);
       }
     }
   };
@@ -637,6 +691,29 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
         await addIncome(inc);
       },
       askAdvisor: async (query: string) => {
+        const execCtx = {
+          expenses,
+          incomes,
+          savings,
+          investments,
+          config,
+          googleUser,
+          addExpense,
+          updateExpense,
+          deleteExpense,
+          addIncome,
+          updateIncome,
+          deleteIncome,
+          addSavingsGoal,
+          updateSavingsAmount,
+          deleteSavingsGoal,
+          addInvestment,
+          deleteInvestment,
+        };
+        const execResult = await processAgentInstruction(query, execCtx);
+        if (execResult.actionExecuted) {
+          return execResult.reply;
+        }
         return await askFinancialAdvisor(query, [], expenses, savings, investments, config, incomes, googleUser);
       },
       onStatusChange: (status, errMsg) => {
@@ -714,8 +791,10 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
         logoutGoogle,
         syncDirectWithGoogle,
         addExpense,
+        updateExpense,
         deleteExpense,
         addIncome,
+        updateIncome,
         deleteIncome,
         addInvestment,
         deleteInvestment,
