@@ -1,4 +1,17 @@
-import type { Expense, Income, SavingsGoal, Investment, AppConfig, GoogleUser, ExpenseCategory, IncomeCategory, ExpenseType } from '../types/finance';
+import type {
+  Expense,
+  Income,
+  SavingsGoal,
+  Investment,
+  ScheduledExpense,
+  ScheduledIncome,
+  RecurrenceType,
+  AppConfig,
+  GoogleUser,
+  ExpenseCategory,
+  IncomeCategory,
+  ExpenseType,
+} from '../types/finance';
 import { calculateFinancialTotals } from '../utils/rulesEngine';
 import { calculateComfortAnalysis } from '../utils/comfortCalculator';
 import { formatMoney } from '../utils/helpers';
@@ -19,6 +32,8 @@ export interface AgentExecutionContext {
   incomes: Income[];
   savings: SavingsGoal[];
   investments: Investment[];
+  scheduledExpenses?: ScheduledExpense[];
+  scheduledIncomes?: ScheduledIncome[];
   config: AppConfig;
   googleUser?: GoogleUser | null;
   addExpense: (expense: Omit<Expense, 'id'>) => Promise<void>;
@@ -33,6 +48,10 @@ export interface AgentExecutionContext {
   addInvestment?: (investment: Omit<Investment, 'id'>) => Promise<void>;
   deleteInvestment?: (id: string) => Promise<void>;
   updateConfig?: (newConfig: Partial<AppConfig>) => Promise<void>;
+  addScheduledExpense?: (item: Omit<ScheduledExpense, 'id'>) => Promise<void>;
+  addScheduledIncome?: (item: Omit<ScheduledIncome, 'id'>) => Promise<void>;
+  executeScheduledExpense?: (id: string) => Promise<void>;
+  executeScheduledIncome?: (id: string) => Promise<void>;
 }
 
 export interface AgentExecutionResult {
@@ -54,6 +73,9 @@ export interface AgentExecutionResult {
       | 'CALCULATE_DAILY_TARGET'
       | 'ANALYZE_WEEKLY_SALES'
       | 'CREATE_INVESTMENT'
+      | 'SCHEDULE_EXPENSE'
+      | 'SCHEDULE_INCOME'
+      | 'EXECUTE_SCHEDULED'
       | 'LEARN_RULE'
       | 'QUERY';
     summary: string;
@@ -189,6 +211,123 @@ function cleanGoalName(text: string, amount: number): string {
   }
   return 'Meta Financiera';
 }
+
+/**
+ * Extrae la fecha de vencimiento/programación según expresiones en lenguaje natural
+ */
+export function extractDueDate(text: string): { dueDate: string; dayOfMonth?: number } {
+  const t = text.toLowerCase();
+  const now = new Date();
+  const todayStr = now.toISOString().split('T')[0];
+
+  if (t.includes('hoy')) {
+    return { dueDate: todayStr, dayOfMonth: now.getDate() };
+  }
+
+  if (t.includes('mañana')) {
+    const tm = new Date(now);
+    tm.setDate(tm.getDate() + 1);
+    return { dueDate: tm.toISOString().split('T')[0], dayOfMonth: tm.getDate() };
+  }
+
+  if (t.includes('pasado mañana')) {
+    const pm = new Date(now);
+    pm.setDate(pm.getDate() + 2);
+    return { dueDate: pm.toISOString().split('T')[0], dayOfMonth: pm.getDate() };
+  }
+
+  // Formato ISO YYYY-MM-DD
+  const isoMatch = t.match(/\b(20\d\d[-/]\d{1,2}[-/]\d{1,2})\b/);
+  if (isoMatch) {
+    const d = new Date(isoMatch[1].replace(/\//g, '-'));
+    if (!isNaN(d.getTime())) {
+      return { dueDate: d.toISOString().split('T')[0], dayOfMonth: d.getDate() };
+    }
+  }
+
+  // Formato DD/MM o DD/MM/YYYY
+  const slashMatch = t.match(/\b(\d{1,2})[/-](\d{1,2})(?:[/-](20\d\d))?\b/);
+  if (slashMatch) {
+    const day = parseInt(slashMatch[1], 10);
+    const month = parseInt(slashMatch[2], 10) - 1;
+    const year = slashMatch[3] ? parseInt(slashMatch[3], 10) : now.getFullYear();
+    const targetDate = new Date(year, month, day);
+    if (!isNaN(targetDate.getTime())) {
+      return { dueDate: targetDate.toISOString().split('T')[0], dayOfMonth: day };
+    }
+  }
+
+  // Expresiones de día del mes: "el 15", "el día 10", "el 5 de cada mes", "los 10"
+  const dayMatch = t.match(/\b(?:el\s+(?:día\s+)?|dia\s+|los\s+)(\d{1,2})(?:\s*(?:de\s+cada\s+mes|\b))/);
+  if (dayMatch) {
+    const dayNum = parseInt(dayMatch[1], 10);
+    if (dayNum >= 1 && dayNum <= 31) {
+      let year = now.getFullYear();
+      let month = now.getMonth();
+      if (now.getDate() > dayNum) {
+        month += 1;
+        if (month > 11) {
+          month = 0;
+          year += 1;
+        }
+      }
+      const daysInTargetMonth = new Date(year, month + 1, 0).getDate();
+      const validDay = Math.min(dayNum, daysInTargetMonth);
+      const computed = new Date(year, month, validDay);
+      return {
+        dueDate: computed.toISOString().split('T')[0],
+        dayOfMonth: dayNum,
+      };
+    }
+  }
+
+  // Por defecto: 7 días a futuro
+  const inAWeek = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+  return { dueDate: inAWeek.toISOString().split('T')[0], dayOfMonth: inAWeek.getDate() };
+}
+
+/**
+ * Extrae la recurrencia especificada
+ */
+export function extractRecurrence(text: string): RecurrenceType {
+  const t = text.toLowerCase();
+  if (t.includes('semanal') || t.includes('cada semana') || t.includes('todas las semanas')) return 'semanal';
+  if (t.includes('quincenal') || t.includes('cada 15') || t.includes('cada quincena')) return 'quincenal';
+  if (t.includes('anual') || t.includes('cada año') || t.includes('todos los años')) return 'anual';
+  if (t.includes('una vez') || t.includes('una sola vez') || t.includes('unica vez') || t.includes('única vez') || t.includes('sola vez')) return 'una_vez';
+  return 'mensual';
+}
+
+/**
+ * Limpia y extrae la descripción de un gasto o ingreso programado
+ */
+function cleanScheduledDescription(text: string, amount: number): string {
+  let clean = text
+    .replace(/(?:por favor|che|gaston|gastón|anot[aá]|registr[aá]|carg[aá]|ingres[aá]|agreg[aá]|program[aá]|agend[aá])/gi, '')
+    .replace(/(?:el débito de|el debito de|débito de|debito de|el débito automático de|el debito automatico de|débito automático de|debito automatico de)/gi, '')
+    .replace(/(?:un gasto programado de|gasto programado de|un cobro programado de|cobro programado de|un ingreso programado de|ingreso programado de)/gi, '')
+    .replace(/(?:un gasto de|un ingreso de|el cobro de|cobro de|el pago de|pago de)/gi, '')
+    .replace(/(?:de cada mes|todos los meses|cada mes|mensual|quincenal|semanal|anual|una vez)/gi, '')
+    .replace(/\b(?:pesos|mangos|ars|lucas|palos|k|mil)\b/gi, '')
+    .replace(/\b(?:el\s+(?:día\s+)?|dia\s+|los\s+)?\d{1,2}(?:\s*(?:de\s+cada\s+mes|\b))?/gi, '')
+    .replace(/\b(?:para el|el día|el dia|para|el)\b/gi, '')
+    .trim();
+
+  if (amount > 0) {
+    const amountStr = amount.toString();
+    clean = clean.replace(new RegExp(`\\$?\\s*${amountStr}`, 'g'), '');
+    const formattedWithDot = amount.toLocaleString('es-AR');
+    clean = clean.replace(new RegExp(`\\$?\\s*${formattedWithDot.replace(/\./g, '\\.')}`, 'g'), '');
+  }
+
+  clean = clean.replace(/\b\d+(?:[.,]\d+)?\b/g, '');
+  clean = clean.replace(/\s+/g, ' ').replace(/^[:\-\s,]+|[:\-\s,]+$/g, '').trim();
+  if (clean.length > 0) {
+    return clean.charAt(0).toUpperCase() + clean.slice(1);
+  }
+  return 'Gasto Programado';
+}
+
 
 /**
  * Motor de procesamiento y ejecución semántica del Agente GASTONAPP
@@ -841,6 +980,248 @@ ${breakdownLines}
         type: 'CREATE_GOAL',
         summary: `Meta de ahorro creada: ${goalName} (${formatMoney(targetAmt, currency)})`,
         data: { name: goalName, targetAmount: targetAmt },
+      },
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // 8D. PROGRAMADOS: EJECUCIÓN (Debitar ahora / Marcar pagado / Cobrar)
+  // ---------------------------------------------------------------------------
+  const isExecuteScheduledIntent =
+    (lower.includes('debit') ||
+      lower.includes('pagar') ||
+      lower.includes('marcar pagad') ||
+      lower.includes('ejecut') ||
+      lower.includes('asentar débito') ||
+      lower.includes('asentar debito')) &&
+    !lower.includes('program') &&
+    !lower.includes('agend') &&
+    !lower.includes('que') &&
+    !lower.includes('qué') &&
+    !lower.includes('cuanto') &&
+    !lower.includes('cuánto');
+
+  if (isExecuteScheduledIntent) {
+    if (ctx.scheduledExpenses && ctx.scheduledExpenses.length > 0) {
+      const pendingExp = ctx.scheduledExpenses.filter((s) => s.status === 'pendiente');
+      const matchedExp = pendingExp.find((s) => {
+        const descLower = s.description.toLowerCase();
+        return lower.includes(descLower) || descLower.split(' ').some((w) => w.length >= 4 && lower.includes(w));
+      });
+
+      if (matchedExp && ctx.executeScheduledExpense) {
+        await ctx.executeScheduledExpense(matchedExp.id);
+        return {
+          reply: `¡Débito procesado y asentado, ${userName}! Asenté el pago de "${matchedExp.description}" por ${formatMoney(
+            matchedExp.amount,
+            currency
+          )} como gasto en la aplicación. Si es recurrente, ya calculé automáticamente su próximo vencimiento.`,
+          actionExecuted: {
+            type: 'EXECUTE_SCHEDULED',
+            summary: `Débito ejecutado: ${matchedExp.description} (${formatMoney(matchedExp.amount, currency)})`,
+            entityId: matchedExp.id,
+            data: matchedExp,
+          },
+        };
+      }
+    }
+
+    if (ctx.scheduledIncomes && ctx.scheduledIncomes.length > 0) {
+      const pendingInc = ctx.scheduledIncomes.filter((s) => s.status === 'pendiente');
+      const matchedInc = pendingInc.find((s) => {
+        const descLower = s.description.toLowerCase();
+        return lower.includes(descLower) || descLower.split(' ').some((w) => w.length >= 4 && lower.includes(w));
+      });
+
+      if (matchedInc && ctx.executeScheduledIncome) {
+        await ctx.executeScheduledIncome(matchedInc.id);
+        return {
+          reply: `¡Cobro asentado con éxito, ${userName}! Registré el ingreso de "${matchedInc.description}" por ${formatMoney(
+            matchedInc.amount,
+            currency
+          )}. Tu saldo disponible aumentó y calculé su próxima fecha programada.`,
+          actionExecuted: {
+            type: 'EXECUTE_SCHEDULED',
+            summary: `Cobro programado ejecutado: ${matchedInc.description} (${formatMoney(matchedInc.amount, currency)})`,
+            entityId: matchedInc.id,
+            data: matchedInc,
+          },
+        };
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 8E. PROGRAMADOS: CONSULTAS ("¿Qué se me debita esta semana?", etc.)
+  // ---------------------------------------------------------------------------
+  const isScheduledQueryIntent =
+    (lower.includes('debita') ||
+      lower.includes('debitan') ||
+      lower.includes('debito') ||
+      lower.includes('débito') ||
+      lower.includes('programad') ||
+      lower.includes('vence') ||
+      lower.includes('vencimiento')) &&
+    (lower.includes('que') ||
+      lower.includes('qué') ||
+      lower.includes('cuanto') ||
+      lower.includes('cuánto') ||
+      lower.includes('cuando') ||
+      lower.includes('cuándo') ||
+      lower.includes('cuales') ||
+      lower.includes('cuáles') ||
+      lower.includes('esta semana') ||
+      lower.includes('este mes') ||
+      lower.includes('hoy') ||
+      lower.includes('proxim') ||
+      lower.includes('próxim')) &&
+    !lower.includes('program') &&
+    !lower.includes('agend');
+
+  if (isScheduledQueryIntent && ctx.scheduledExpenses) {
+    const pendingExpenses = ctx.scheduledExpenses.filter((s) => s.status === 'pendiente');
+    const in7Days = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+
+    const upcoming7Days = pendingExpenses.filter((s) => s.dueDate >= todayStr && s.dueDate <= in7Days);
+    const total7Days = upcoming7Days.reduce((sum, s) => sum + Number(s.amount || 0), 0);
+    const totalMonth = pendingExpenses
+      .filter((s) => s.dueDate.startsWith(currentMonthPrefix))
+      .reduce((sum, s) => sum + Number(s.amount || 0), 0);
+
+    if (pendingExpenses.length === 0) {
+      return {
+        reply: `No tenés débitos ni gastos programados pendientes por el momento, ${userName}. La pizarra de débitos está limpia.`,
+        actionExecuted: {
+          type: 'QUERY',
+          summary: 'Consulta de débitos programados: 0 pendientes',
+        },
+      };
+    }
+
+    let detailLines = '';
+    if (upcoming7Days.length > 0) {
+      detailLines = upcoming7Days
+        .map((s) => {
+          const isToday = s.dueDate === todayStr;
+          const badge = isToday ? '⚠️ ¡HOY!' : `📅 ${s.dueDate}`;
+          const typeBadge = s.autoDebit ? '[Débito Automático]' : '[Manual]';
+          return `• ${badge} - ${s.description}: ${formatMoney(s.amount, currency)} ${typeBadge} (${s.recurrence})`;
+        })
+        .join('\n');
+    } else {
+      detailLines = `• No tenés débitos programados en los próximos 7 días. El próximo más cercano es "${pendingExpenses[0].description}" el ${pendingExpenses[0].dueDate} (${formatMoney(pendingExpenses[0].amount, currency)}).`;
+    }
+
+    const reply = `Resumen de débitos y pagos programados, ${userName}:
+
+💳 Próximos 7 días: ${formatMoney(total7Days, currency)} (${upcoming7Days.length} vencimiento${upcoming7Days.length === 1 ? '' : 's'})
+🗓️ Total proyectado en el mes: ${formatMoney(totalMonth, currency)} (${pendingExpenses.length} débito${pendingExpenses.length === 1 ? '' : 's'} activos)
+
+Vencimientos:
+${detailLines}
+
+💡 Te avisaré automáticamente antes de cada débito en la barra superior y notificaciones del navegador/Telegram.`;
+
+    return {
+      reply,
+      actionExecuted: {
+        type: 'QUERY',
+        summary: `Consulta de débitos: ${formatMoney(total7Days, currency)} en 7 días`,
+        data: { upcoming7Days, total7Days, totalMonth },
+      },
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // 8F. PROGRAMADOS: CREACIÓN (Programar o agendar débito o cobro)
+  // ---------------------------------------------------------------------------
+  const isScheduleExpenseIntent =
+    (lower.includes('program') || lower.includes('agend')) &&
+    (lower.includes('debit') ||
+      lower.includes('gasto') ||
+      lower.includes('pago') ||
+      lower.includes('cuota') ||
+      lower.includes('servicio') ||
+      lower.includes('factura') ||
+      lower.includes('alquiler') ||
+      lower.includes('seguro') ||
+      lower.includes('tarjeta')) &&
+    !lower.includes('ingreso') &&
+    !lower.includes('cobr');
+
+  if (isScheduleExpenseIntent && amountFound > 0 && ctx.addScheduledExpense) {
+    const desc = cleanScheduledDescription(prompt, amountFound) || 'Débito programado';
+    const category = inferExpenseCategory(desc);
+    const dateInfo = extractDueDate(prompt);
+    const recurrence = extractRecurrence(prompt);
+    const autoDebit = lower.includes('auto') || lower.includes('debito') || lower.includes('débito');
+
+    await ctx.addScheduledExpense({
+      description: desc,
+      amount: amountFound,
+      category,
+      type: 'fijo',
+      recurrence,
+      dueDate: dateInfo.dueDate,
+      dayOfMonth: dateInfo.dayOfMonth,
+      autoDebit,
+      paymentMethod: autoDebit ? 'Débito Automático' : 'Tarjeta / Transferencia',
+      notifyDaysBefore: 2,
+      status: 'pendiente',
+      notes: 'Programado por Agente GASTONAPP',
+    });
+
+    return {
+      reply: `Débito programado con éxito, ${userName}: agendé "${desc}" por ${formatMoney(
+        amountFound,
+        currency
+      )} con vencimiento el ${dateInfo.dueDate} (${recurrence}, ${
+        autoDebit ? 'Débito automático' : 'Pago manual'
+      }). Te avisaré 2 días antes de que se debite.`,
+      actionExecuted: {
+        type: 'SCHEDULE_EXPENSE',
+        summary: `Débito programado: ${desc} por ${formatMoney(amountFound, currency)} el ${dateInfo.dueDate}`,
+        data: { description: desc, amount: amountFound, dueDate: dateInfo.dueDate, recurrence, autoDebit },
+      },
+    };
+  }
+
+  const isScheduleIncomeIntent =
+    (lower.includes('program') || lower.includes('agend')) &&
+    (lower.includes('ingreso') ||
+      lower.includes('cobr') ||
+      lower.includes('sueldo') ||
+      lower.includes('honorario') ||
+      lower.includes('cliente'));
+
+  if (isScheduleIncomeIntent && amountFound > 0 && ctx.addScheduledIncome) {
+    const desc = cleanScheduledDescription(prompt, amountFound) || 'Cobro programado';
+    const category = inferIncomeCategory(desc);
+    const dateInfo = extractDueDate(prompt);
+    const recurrence = extractRecurrence(prompt);
+
+    await ctx.addScheduledIncome({
+      description: desc,
+      amount: amountFound,
+      category,
+      recurrence,
+      expectedDate: dateInfo.dueDate,
+      dayOfMonth: dateInfo.dayOfMonth,
+      paymentMethod: 'Transferencia bancaria',
+      notifyDaysBefore: 1,
+      status: 'pendiente',
+      notes: 'Programado por Agente GASTONAPP',
+    });
+
+    return {
+      reply: `Cobro programado con éxito, ${userName}: agendé el ingreso de "${desc}" por ${formatMoney(
+        amountFound,
+        currency
+      )} esperado para el ${dateInfo.dueDate} (${recurrence}). Lo verás reflejado en tu calendario financiero.`,
+      actionExecuted: {
+        type: 'SCHEDULE_INCOME',
+        summary: `Cobro programado: ${desc} por ${formatMoney(amountFound, currency)} el ${dateInfo.dueDate}`,
+        data: { description: desc, amount: amountFound, expectedDate: dateInfo.dueDate, recurrence },
       },
     };
   }

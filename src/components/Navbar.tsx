@@ -26,13 +26,16 @@ import {
   ArrowUpRight,
   Trash2,
   Download,
+  Calendar,
 } from 'lucide-react';
 import { useFinance } from '../context/FinanceContext';
 import { formatMoney } from '../utils/helpers';
 import { calculateFinancialTotals } from '../utils/rulesEngine';
+import { getUpcomingScheduledExpenses } from '../services/notificationService';
 
 export type NavTab =
   | 'dashboard'
+  | 'scheduled'
   | 'evaluator'
   | 'incomes'
   | 'expenses'
@@ -80,9 +83,11 @@ export const Navbar: React.FC<NavbarProps> = ({
     logoutGoogle,
     syncDirectWithGoogle,
     telegramBotStatus,
+    scheduledExpenses,
   } = useFinance();
 
   const totals = calculateFinancialTotals(expenses, savings, config, incomes);
+  const upcomingDebitsCount = getUpcomingScheduledExpenses(scheduledExpenses || [], 3).length;
 
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
@@ -119,6 +124,14 @@ export const Navbar: React.FC<NavbarProps> = ({
       description: 'Resumen financiero general',
       icon: PieChart,
       color: 'text-slate-700',
+    },
+    {
+      id: 'scheduled',
+      label: 'Programados',
+      description: 'Débitos automáticos y cobros',
+      icon: Calendar,
+      badge: upcomingDebitsCount > 0 ? upcomingDebitsCount : undefined,
+      color: 'text-indigo-600',
     },
     {
       id: 'incomes',

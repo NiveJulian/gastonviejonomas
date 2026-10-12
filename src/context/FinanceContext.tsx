@@ -1,6 +1,15 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import type { ReactNode } from 'react';
-import type { Expense, Investment, SavingsGoal, AppConfig, GoogleUser, Income } from '../types/finance';
+import type {
+  Expense,
+  Investment,
+  SavingsGoal,
+  AppConfig,
+  GoogleUser,
+  Income,
+  ScheduledExpense,
+  ScheduledIncome,
+} from '../types/finance';
 import {
   fetchFromGoogleSheet,
   postExpenseToSheet,
@@ -24,6 +33,8 @@ import {
   appendIncomeDirect,
   appendInvestmentDirect,
   appendSavingsDirect,
+  appendScheduledExpenseDirect,
+  appendScheduledIncomeDirect,
   deleteRowDirect,
   ensureIncomeSheetExists,
   uploadReceiptToDriveDirect,
@@ -33,12 +44,18 @@ import { generateId, getCurrentYearMonth, extractSpreadsheetId } from '../utils/
 import { startBrowserTelegramBot, stopBrowserTelegramBot } from '../services/browserTelegramBot';
 import { askFinancialAdvisor } from '../services/geminiService';
 import { processAgentInstruction } from '../services/agentEngine';
+import {
+  checkAndTriggerScheduledNotifications,
+  calculateNextDueDate,
+} from '../services/notificationService';
 
 interface FinanceContextType {
   expenses: Expense[];
   incomes: Income[];
   investments: Investment[];
   savings: SavingsGoal[];
+  scheduledExpenses: ScheduledExpense[];
+  scheduledIncomes: ScheduledIncome[];
   config: AppConfig;
   googleUser: GoogleUser | null;
   isSyncing: boolean;
@@ -47,6 +64,15 @@ interface FinanceContextType {
   logoutGoogle: () => void;
   syncDirectWithGoogle: () => Promise<boolean>;
   connectSharedSpreadsheet: (urlOrId: string) => Promise<{ success: boolean; message: string }>;
+  addScheduledExpense: (expense: Omit<ScheduledExpense, 'id'>) => Promise<void>;
+  updateScheduledExpense: (id: string, updated: Partial<ScheduledExpense>) => Promise<void>;
+  deleteScheduledExpense: (id: string) => Promise<void>;
+  executeScheduledExpense: (id: string) => Promise<void>;
+  addScheduledIncome: (income: Omit<ScheduledIncome, 'id'>) => Promise<void>;
+  updateScheduledIncome: (id: string, updated: Partial<ScheduledIncome>) => Promise<void>;
+  deleteScheduledIncome: (id: string) => Promise<void>;
+  executeScheduledIncome: (id: string) => Promise<void>;
+  checkScheduledNotifications: (force?: boolean) => Promise<{ browserSent: number; telegramSent: number }>;
   addExpense: (
     expense: Omit<Expense, 'id'>,
     receiptBase64?: string,
@@ -124,6 +150,16 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
     return saved ? JSON.parse(saved) : getInitialState().savings;
   });
 
+  const [scheduledExpenses, setScheduledExpenses] = useState<ScheduledExpense[]>(() => {
+    const saved = localStorage.getItem(STORAGE_KEY + '_scheduled_expenses');
+    return saved ? JSON.parse(saved) : [];
+  });
+
+  const [scheduledIncomes, setScheduledIncomes] = useState<ScheduledIncome[]>(() => {
+    const saved = localStorage.getItem(STORAGE_KEY + '_scheduled_incomes');
+    return saved ? JSON.parse(saved) : [];
+  });
+
   const [config, setConfig] = useState<AppConfig>(() => {
     const saved = localStorage.getItem(STORAGE_KEY + '_config');
     if (saved) {
@@ -190,8 +226,33 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
   }, [savings]);
 
   useEffect(() => {
+    localStorage.setItem(STORAGE_KEY + '_scheduled_expenses', JSON.stringify(scheduledExpenses));
+  }, [scheduledExpenses]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY + '_scheduled_incomes', JSON.stringify(scheduledIncomes));
+  }, [scheduledIncomes]);
+
+  useEffect(() => {
     localStorage.setItem(STORAGE_KEY + '_config', JSON.stringify(config));
   }, [config]);
+
+  // Comprobar y disparar notificaciones de débitos programados al cargar y periódicamente
+  useEffect(() => {
+    const runCheck = () => {
+      checkAndTriggerScheduledNotifications({
+        scheduledExpenses,
+        scheduledIncomes,
+        telegramToken: config.telegramBotToken,
+        telegramChatId: config.telegramChatId,
+        currency: config.currency,
+      });
+    };
+
+    runCheck();
+    const interval = setInterval(runCheck, 60 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [scheduledExpenses, scheduledIncomes, config.telegramBotToken, config.telegramChatId, config.currency]);
 
   // Si hay sesión guardada al iniciar, sincronizar datos existentes en background
   useEffect(() => {
@@ -251,6 +312,8 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
       if (data.expenses && data.expenses.length > 0) setExpenses(data.expenses);
       if (data.investments && data.investments.length > 0) setInvestments(data.investments);
       if (data.savings && data.savings.length > 0) setSavings(data.savings);
+      if (data.scheduledExpenses && data.scheduledExpenses.length > 0) setScheduledExpenses(data.scheduledExpenses);
+      if (data.scheduledIncomes && data.scheduledIncomes.length > 0) setScheduledIncomes(data.scheduledIncomes);
 
       // Sincronizar Ingresos de Google Sheets y fusionar con datos locales existentes si aplica
       if (data.incomes && data.incomes.length > 0) {
@@ -749,6 +812,170 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
     }
   };
 
+  // --- GASTOS PROGRAMADOS ---
+  const addScheduledExpense = async (expenseData: Omit<ScheduledExpense, 'id'>) => {
+    const id = generateId();
+    const newScheduled: ScheduledExpense = { ...expenseData, id };
+    setScheduledExpenses((prev) => [newScheduled, ...prev]);
+
+    if (googleUser && config.googleSpreadsheetId) {
+      try {
+        await appendScheduledExpenseDirect(googleUser.accessToken, config.googleSpreadsheetId, newScheduled);
+      } catch (err: any) {
+        console.warn('Error guardando gasto programado en Sheets:', err);
+      }
+    }
+  };
+
+  const updateScheduledExpense = async (id: string, updated: Partial<ScheduledExpense>) => {
+    let updatedItem: ScheduledExpense | undefined;
+    setScheduledExpenses((prev) =>
+      prev.map((e) => {
+        if (e.id === id) {
+          updatedItem = { ...e, ...updated };
+          return updatedItem;
+        }
+        return e;
+      })
+    );
+
+    if (googleUser && config.googleSpreadsheetId && updatedItem) {
+      try {
+        await deleteRowDirect(googleUser.accessToken, config.googleSpreadsheetId, 'GastosProgramados', id);
+        await appendScheduledExpenseDirect(googleUser.accessToken, config.googleSpreadsheetId, updatedItem);
+      } catch (err) {
+        console.warn('Error actualizando gasto programado en Sheets:', err);
+      }
+    }
+  };
+
+  const deleteScheduledExpense = async (id: string) => {
+    setScheduledExpenses((prev) => prev.filter((e) => e.id !== id));
+    if (googleUser && config.googleSpreadsheetId) {
+      try {
+        await deleteRowDirect(googleUser.accessToken, config.googleSpreadsheetId, 'GastosProgramados', id);
+      } catch {}
+    }
+  };
+
+  const executeScheduledExpense = async (id: string) => {
+    const item = scheduledExpenses.find((e) => e.id === id);
+    if (!item) return;
+
+    // 1. Asentar como gasto real en el sistema
+    await addExpense({
+      date: new Date().toISOString().split('T')[0],
+      description: item.description,
+      amount: item.amount,
+      category: item.category,
+      type: item.type,
+      paymentMethod: item.paymentMethod || 'Débito',
+      notes: item.notes ? `${item.notes} (Débito programado)` : 'Débito programado ejecutado',
+    });
+
+    // 2. Si es de una sola vez, marcarlo completado; si es recurrente, avanzar fecha de vencimiento
+    if (item.recurrence === 'una_vez') {
+      await updateScheduledExpense(id, {
+        status: 'completado',
+        lastExecutedDate: new Date().toISOString().split('T')[0],
+      });
+    } else {
+      const nextDate = calculateNextDueDate(item.dueDate, item.recurrence, item.dayOfMonth);
+      await updateScheduledExpense(id, {
+        dueDate: nextDate,
+        lastExecutedDate: new Date().toISOString().split('T')[0],
+        status: 'pendiente',
+      });
+    }
+  };
+
+  // --- INGRESOS PROGRAMADOS ---
+  const addScheduledIncome = async (incomeData: Omit<ScheduledIncome, 'id'>) => {
+    const id = generateId();
+    const newScheduled: ScheduledIncome = { ...incomeData, id };
+    setScheduledIncomes((prev) => [newScheduled, ...prev]);
+
+    if (googleUser && config.googleSpreadsheetId) {
+      try {
+        await appendScheduledIncomeDirect(googleUser.accessToken, config.googleSpreadsheetId, newScheduled);
+      } catch (err: any) {
+        console.warn('Error guardando ingreso programado en Sheets:', err);
+      }
+    }
+  };
+
+  const updateScheduledIncome = async (id: string, updated: Partial<ScheduledIncome>) => {
+    let updatedItem: ScheduledIncome | undefined;
+    setScheduledIncomes((prev) =>
+      prev.map((i) => {
+        if (i.id === id) {
+          updatedItem = { ...i, ...updated };
+          return updatedItem;
+        }
+        return i;
+      })
+    );
+
+    if (googleUser && config.googleSpreadsheetId && updatedItem) {
+      try {
+        await deleteRowDirect(googleUser.accessToken, config.googleSpreadsheetId, 'IngresosProgramados', id);
+        await appendScheduledIncomeDirect(googleUser.accessToken, config.googleSpreadsheetId, updatedItem);
+      } catch (err) {
+        console.warn('Error actualizando ingreso programado en Sheets:', err);
+      }
+    }
+  };
+
+  const deleteScheduledIncome = async (id: string) => {
+    setScheduledIncomes((prev) => prev.filter((i) => i.id !== id));
+    if (googleUser && config.googleSpreadsheetId) {
+      try {
+        await deleteRowDirect(googleUser.accessToken, config.googleSpreadsheetId, 'IngresosProgramados', id);
+      } catch {}
+    }
+  };
+
+  const executeScheduledIncome = async (id: string) => {
+    const item = scheduledIncomes.find((i) => i.id === id);
+    if (!item) return;
+
+    // 1. Asentar como ingreso real en el sistema
+    await addIncome({
+      date: new Date().toISOString().split('T')[0],
+      description: item.description,
+      amount: item.amount,
+      category: item.category,
+      paymentMethod: item.paymentMethod || 'Transferencia',
+      notes: item.notes ? `${item.notes} (Cobro programado)` : 'Cobro programado acreditado',
+    });
+
+    // 2. Si es de una sola vez, marcar completado; si es recurrente, avanzar fecha
+    if (item.recurrence === 'una_vez') {
+      await updateScheduledIncome(id, {
+        status: 'completado',
+        lastExecutedDate: new Date().toISOString().split('T')[0],
+      });
+    } else {
+      const nextDate = calculateNextDueDate(item.expectedDate, item.recurrence, item.dayOfMonth);
+      await updateScheduledIncome(id, {
+        expectedDate: nextDate,
+        lastExecutedDate: new Date().toISOString().split('T')[0],
+        status: 'pendiente',
+      });
+    }
+  };
+
+  const checkScheduledNotifications = async (force?: boolean) => {
+    return checkAndTriggerScheduledNotifications({
+      scheduledExpenses,
+      scheduledIncomes,
+      telegramToken: config.telegramBotToken,
+      telegramChatId: config.telegramChatId,
+      currency: config.currency,
+      force,
+    });
+  };
+
   // Exportar respaldo JSON
   const exportDataJson = () => {
     const payload = {
@@ -879,6 +1106,8 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
     setIncomes([]);
     setInvestments([]);
     setSavings([]);
+    setScheduledExpenses([]);
+    setScheduledIncomes([]);
     setConfig(initialState.config);
 
     // 2. Limpieza de llaves en localStorage
@@ -887,6 +1116,8 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
       localStorage.removeItem(STORAGE_KEY + '_incomes');
       localStorage.removeItem(STORAGE_KEY + '_investments');
       localStorage.removeItem(STORAGE_KEY + '_savings');
+      localStorage.removeItem(STORAGE_KEY + '_scheduled_expenses');
+      localStorage.removeItem(STORAGE_KEY + '_scheduled_incomes');
       localStorage.removeItem(STORAGE_KEY + '_config');
       localStorage.removeItem('misfinanzas_data_v1_expenses');
       localStorage.removeItem('misfinanzas_data_v1_incomes');
@@ -905,6 +1136,8 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
         incomes,
         investments,
         savings,
+        scheduledExpenses,
+        scheduledIncomes,
         config,
         googleUser,
         isSyncing,
@@ -913,6 +1146,15 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
         logoutGoogle,
         syncDirectWithGoogle,
         connectSharedSpreadsheet,
+        addScheduledExpense,
+        updateScheduledExpense,
+        deleteScheduledExpense,
+        executeScheduledExpense,
+        addScheduledIncome,
+        updateScheduledIncome,
+        deleteScheduledIncome,
+        executeScheduledIncome,
+        checkScheduledNotifications,
         addExpense,
         updateExpense,
         deleteExpense,

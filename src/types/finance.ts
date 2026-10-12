@@ -48,6 +48,42 @@ export interface Income {
   notes?: string;
 }
 
+// ---------------- PROGRAMADOS / RECURRENTES ----------------
+export type RecurrenceType = 'mensual' | 'quincenal' | 'semanal' | 'anual' | 'una_vez';
+export type ScheduledStatus = 'pendiente' | 'completado' | 'cancelado';
+
+export interface ScheduledExpense {
+  id: string;
+  description: string;
+  amount: number;
+  category: ExpenseCategory | string;
+  type: ExpenseType;
+  recurrence: RecurrenceType;
+  dueDate: string; // Formato YYYY-MM-DD
+  dayOfMonth?: number; // Día preferido del mes (1-31)
+  autoDebit: boolean; // Si se debita automáticamente de la cuenta/tarjeta
+  paymentMethod: string;
+  notifyDaysBefore: number; // Días antes para alertar (0 = el mismo día)
+  status: ScheduledStatus;
+  lastExecutedDate?: string;
+  notes?: string;
+}
+
+export interface ScheduledIncome {
+  id: string;
+  description: string;
+  amount: number;
+  category: IncomeCategory | string;
+  recurrence: RecurrenceType;
+  expectedDate: string; // Formato YYYY-MM-DD
+  dayOfMonth?: number; // Día preferido del mes (1-31)
+  paymentMethod?: string;
+  notifyDaysBefore: number; // Días antes para alertar
+  status: ScheduledStatus;
+  lastExecutedDate?: string;
+  notes?: string;
+}
+
 export type InvestmentType =
   | 'Plazo Fijo'
   | 'Fondos Comunes / FCI'

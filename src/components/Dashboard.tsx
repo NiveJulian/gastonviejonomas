@@ -1,4 +1,3 @@
-import React from 'react';
 import {
   Wallet,
   ArrowUpRight,
@@ -12,10 +11,16 @@ import {
   PiggyBank,
   CheckCircle2,
   AlertTriangle,
+  Calendar,
+  Clock,
+  Zap,
+  Check,
+  ChevronRight,
 } from 'lucide-react';
 import { useFinance } from '../context/FinanceContext';
 import { formatMoney, formatDate, getCurrentYearMonth } from '../utils/helpers';
 import { calculateFinancialTotals } from '../utils/rulesEngine';
+import { getUpcomingScheduledExpenses } from '../services/notificationService';
 
 // Chart.js imports
 import {
@@ -36,7 +41,7 @@ interface DashboardProps {
   onOpenExpenseModal: () => void;
   onOpenIncomeModal?: () => void;
   onOpenEvaluator: () => void;
-  onNavigateTab: (tab: 'evaluator' | 'expenses' | 'investments' | 'savings' | 'incomes') => void;
+  onNavigateTab: (tab: 'evaluator' | 'expenses' | 'investments' | 'savings' | 'incomes' | 'scheduled') => void;
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({
@@ -45,8 +50,19 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onOpenEvaluator,
   onNavigateTab,
 }) => {
-  const { expenses, incomes, investments, savings, config, googleUser, loginWithGoogle } = useFinance();
+  const {
+    expenses,
+    incomes,
+    investments,
+    savings,
+    scheduledExpenses,
+    executeScheduledExpense,
+    config,
+    googleUser,
+    loginWithGoogle,
+  } = useFinance();
   const totals = calculateFinancialTotals(expenses, savings, config, incomes);
+  const upcomingDebits = getUpcomingScheduledExpenses(scheduledExpenses || [], 7);
 
   const totalInvestments = investments.reduce((sum, i) => sum + Number(i.currentValue || 0), 0);
   const netWorth = totals.totalSavingsBalance + totalInvestments + totals.freeCashFlow;
@@ -136,6 +152,88 @@ export const Dashboard: React.FC<DashboardProps> = ({
               </svg>
               <span>Vincular con Google ahora</span>
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Alerta de Débitos y Vencimientos Próximos (7 días) */}
+      {upcomingDebits.length > 0 && (
+        <div className="bg-gradient-to-r from-amber-500/10 via-rose-500/10 to-indigo-500/10 border border-amber-300/60 rounded-3xl p-5 shadow-xs space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 bg-amber-500 text-white rounded-xl shadow-xs">
+                <Clock className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-extrabold text-slate-900 text-sm sm:text-base flex items-center gap-2">
+                  <span>Próximos Débitos a Descontar</span>
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-rose-600 text-white font-bold">
+                    {upcomingDebits.length} {upcomingDebits.length === 1 ? 'pago' : 'pagos'}
+                  </span>
+                </h3>
+                <p className="text-xs text-slate-600">
+                  Total comprometido en los próximos 7 días:{' '}
+                  <strong className="text-rose-700">
+                    {formatMoney(
+                      upcomingDebits.reduce((acc, curr) => acc + curr.expense.amount, 0),
+                      config.currency
+                    )}
+                  </strong>
+                </p>
+              </div>
+            </div>
+
+            <button
+              onClick={() => onNavigateTab('scheduled')}
+              className="px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-800 border border-slate-200 rounded-xl text-xs font-bold transition-colors flex items-center gap-1 shadow-xs shrink-0"
+            >
+              <span>Ver todos</span>
+              <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5 pt-1">
+            {upcomingDebits.slice(0, 3).map(({ expense, daysRemaining }) => {
+              const isToday = daysRemaining === 0;
+              const isTomorrow = daysRemaining === 1;
+
+              return (
+                <div
+                  key={expense.id}
+                  className="bg-white p-3 rounded-2xl border border-slate-200/90 shadow-2xs flex items-center justify-between gap-2"
+                >
+                  <div className="min-w-0 space-y-0.5">
+                    <span
+                      className={`text-[9px] font-black px-1.5 py-0.2 rounded-full inline-block ${
+                        isToday
+                          ? 'bg-rose-600 text-white animate-pulse'
+                          : isTomorrow
+                          ? 'bg-amber-100 text-amber-900'
+                          : 'bg-slate-100 text-slate-600'
+                      }`}
+                    >
+                      {isToday ? '¡HOY!' : isTomorrow ? 'MAÑANA' : `En ${daysRemaining} días`}
+                    </span>
+                    <p className="font-bold text-xs text-slate-900 truncate">{expense.description}</p>
+                    <p className="text-[10px] text-slate-500 truncate">{expense.paymentMethod}</p>
+                  </div>
+
+                  <div className="text-right shrink-0">
+                    <p className="font-black text-xs text-rose-600">
+                      -{formatMoney(expense.amount, config.currency)}
+                    </p>
+                    <button
+                      onClick={() => executeScheduledExpense(expense.id)}
+                      className="mt-1 px-2 py-0.5 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 rounded-lg text-[10px] font-bold transition-colors flex items-center gap-1"
+                      title="Marcar como ya debitado"
+                    >
+                      <Check className="w-2.5 h-2.5" />
+                      <span>Debitar</span>
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}

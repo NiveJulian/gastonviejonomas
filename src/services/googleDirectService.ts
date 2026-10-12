@@ -1,4 +1,13 @@
-import type { Expense, Income, Investment, SavingsGoal, AppConfig, DrivePermission } from '../types/finance';
+import type {
+  Expense,
+  Income,
+  Investment,
+  SavingsGoal,
+  ScheduledExpense,
+  ScheduledIncome,
+  AppConfig,
+  DrivePermission,
+} from '../types/finance';
 import { extractSpreadsheetId } from '../utils/helpers';
 
 const SPREADSHEET_NAME = 'FinanzaHogar - Mis Finanzas';
@@ -90,6 +99,128 @@ export async function ensureIncomeSheetExists(
     );
   } catch (err) {
     console.warn('[GoogleDirectService] Error asegurando pestaña Ingresos:', err);
+  }
+}
+
+/**
+ * Verifica si existen las pestañas 'GastosProgramados' e 'IngresosProgramados'.
+ * Si no existen, las agrega automáticamente con sus encabezados correspondientes.
+ */
+export async function ensureScheduledSheetsExists(
+  accessToken: string,
+  spreadsheetId: string
+): Promise<void> {
+  try {
+    const metaUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties(sheetId,title)`;
+    const metaRes = await fetch(metaUrl, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!metaRes.ok) return;
+
+    const meta = await metaRes.json();
+    const sheetsList = meta.sheets || [];
+    const hasExpSheet = sheetsList.some(
+      (s: any) => s.properties?.title?.toLowerCase() === 'gastosprogramados'
+    );
+    const hasIncSheet = sheetsList.some(
+      (s: any) => s.properties?.title?.toLowerCase() === 'ingresosprogramados'
+    );
+
+    const requests: any[] = [];
+    if (!hasExpSheet) {
+      requests.push({
+        addSheet: {
+          properties: {
+            title: 'GastosProgramados',
+            gridProperties: { frozenRowCount: 1 },
+          },
+        },
+      });
+    }
+    if (!hasIncSheet) {
+      requests.push({
+        addSheet: {
+          properties: {
+            title: 'IngresosProgramados',
+            gridProperties: { frozenRowCount: 1 },
+          },
+        },
+      });
+    }
+
+    if (requests.length === 0) return;
+
+    const addRes = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ requests }),
+      }
+    );
+
+    if (!addRes.ok) return;
+
+    // Agregar encabezados
+    const headerData: any[] = [];
+    if (!hasExpSheet) {
+      headerData.push({
+        range: 'GastosProgramados!A1:J1',
+        values: [
+          [
+            'ID',
+            'Descripción',
+            'Monto',
+            'Categoría',
+            'Tipo',
+            'Recurrencia',
+            'FechaVencimiento',
+            'DebitoAutomatico',
+            'MetodoPago',
+            'Estado',
+          ],
+        ],
+      });
+    }
+    if (!hasIncSheet) {
+      headerData.push({
+        range: 'IngresosProgramados!A1:H1',
+        values: [
+          [
+            'ID',
+            'Descripción',
+            'Monto',
+            'Categoría',
+            'Recurrencia',
+            'FechaEsperada',
+            'MetodoPago',
+            'Estado',
+          ],
+        ],
+      });
+    }
+
+    if (headerData.length > 0) {
+      await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchUpdate`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            valueInputOption: 'USER_ENTERED',
+            data: headerData,
+          }),
+        }
+      );
+    }
+  } catch (err) {
+    console.warn('[GoogleDirectService] Error asegurando pestañas programadas:', err);
   }
 }
 
@@ -424,10 +555,13 @@ export async function readAllFromGoogleSheetsDirect(
   incomes: Income[];
   investments: Investment[];
   savings: SavingsGoal[];
+  scheduledExpenses?: ScheduledExpense[];
+  scheduledIncomes?: ScheduledIncome[];
   config: Partial<AppConfig>;
 }> {
-  // Intentar asegurar que la pestaña Ingresos exista si tenemos permisos de edición
+  // Intentar asegurar que las pestañas existan si tenemos permisos de edición
   await ensureIncomeSheetExists(accessToken, spreadsheetId).catch(() => {});
+  await ensureScheduledSheetsExists(accessToken, spreadsheetId).catch(() => {});
 
   // 1. Obtener la metadata de las pestañas que realmente existen en el documento
   let sheetTitles: string[] = ['Gastos', 'Ingresos', 'Inversiones', 'Ahorros', 'Configuracion'];
@@ -449,6 +583,8 @@ export async function readAllFromGoogleSheetsDirect(
   const hasAhorros = sheetTitles.some((t) => t.toLowerCase() === 'ahorros');
   const hasConfiguracion = sheetTitles.some((t) => t.toLowerCase() === 'configuracion');
   const hasIngresos = sheetTitles.some((t) => t.toLowerCase() === 'ingresos');
+  const hasGastosProg = sheetTitles.some((t) => t.toLowerCase() === 'gastosprogramados');
+  const hasIngresosProg = sheetTitles.some((t) => t.toLowerCase() === 'ingresosprogramados');
 
   const rangesToFetch: { key: string; range: string }[] = [];
   if (hasGastos) rangesToFetch.push({ key: 'gastos', range: 'Gastos!A2:I' });
@@ -456,6 +592,8 @@ export async function readAllFromGoogleSheetsDirect(
   if (hasAhorros) rangesToFetch.push({ key: 'ahorros', range: 'Ahorros!A2:G' });
   if (hasConfiguracion) rangesToFetch.push({ key: 'configuracion', range: 'Configuracion!A2:B' });
   if (hasIngresos) rangesToFetch.push({ key: 'ingresos', range: 'Ingresos!A2:G' });
+  if (hasGastosProg) rangesToFetch.push({ key: 'gastosprogramados', range: 'GastosProgramados!A2:J' });
+  if (hasIngresosProg) rangesToFetch.push({ key: 'ingresosprogramados', range: 'IngresosProgramados!A2:H' });
 
   if (rangesToFetch.length === 0) {
     return {
@@ -463,6 +601,8 @@ export async function readAllFromGoogleSheetsDirect(
       incomes: [],
       investments: [],
       savings: [],
+      scheduledExpenses: [],
+      scheduledIncomes: [],
       config: {},
     };
   }
@@ -559,11 +699,55 @@ export async function readAllFromGoogleSheetsDirect(
       notes: row[6] ? String(row[6]) : undefined,
     }));
 
+  // 6. Gastos Programados
+  const expProgRows = getRowsForKey('gastosprogramados');
+  const scheduledExpenses: ScheduledExpense[] = expProgRows
+    .filter((row: any[]) => row && (row[0] || row[1]))
+    .map((row: any[]) => ({
+      id: String(row[0] || Math.random().toString(36).substring(2, 9)),
+      description: String(row[1] || 'Gasto Programado'),
+      amount: parseFloat(String(row[2]).replace(/[^0-9.-]+/g, '')) || 0,
+      category: String(row[3] || 'Servicios (Luz, Agua, Gas, Internet)'),
+      type: (String(row[4]).toLowerCase() === 'variable' ? 'variable' : 'fijo') as any,
+      recurrence: (String(row[5]).toLowerCase() || 'mensual') as any,
+      dueDate: String(row[6] || new Date().toISOString().split('T')[0]),
+      autoDebit: String(row[7]).toUpperCase() === 'SI' || String(row[7]) === 'true',
+      paymentMethod: String(row[8] || 'Débito Automático'),
+      status: (String(row[9]).toLowerCase() === 'completado'
+        ? 'completado'
+        : String(row[9]).toLowerCase() === 'cancelado'
+        ? 'cancelado'
+        : 'pendiente') as any,
+      notifyDaysBefore: 1,
+    }));
+
+  // 7. Ingresos Programados
+  const incProgRows = getRowsForKey('ingresosprogramados');
+  const scheduledIncomes: ScheduledIncome[] = incProgRows
+    .filter((row: any[]) => row && (row[0] || row[1]))
+    .map((row: any[]) => ({
+      id: String(row[0] || Math.random().toString(36).substring(2, 9)),
+      description: String(row[1] || 'Ingreso Programado'),
+      amount: parseFloat(String(row[2]).replace(/[^0-9.-]+/g, '')) || 0,
+      category: String(row[3] || 'Sueldo / Salario'),
+      recurrence: (String(row[4]).toLowerCase() || 'mensual') as any,
+      expectedDate: String(row[5] || new Date().toISOString().split('T')[0]),
+      paymentMethod: String(row[6] || 'Transferencia'),
+      status: (String(row[7]).toLowerCase() === 'completado'
+        ? 'completado'
+        : String(row[7]).toLowerCase() === 'cancelado'
+        ? 'cancelado'
+        : 'pendiente') as any,
+      notifyDaysBefore: 1,
+    }));
+
   return {
     expenses,
     incomes,
     investments,
     savings,
+    scheduledExpenses,
+    scheduledIncomes,
     config: {
       monthlyIncome: parseFloat(String(configMap['IngresoMensual'] || '0')) || 0,
       currency: configMap['Moneda'] || '$',
@@ -828,6 +1012,86 @@ export async function appendSavingsDirect(
     }
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error?.message || 'Error al guardar meta de ahorro en Google Sheets');
+  }
+}
+
+/**
+ * Agrega un gasto programado directamente a Google Sheets
+ */
+export async function appendScheduledExpenseDirect(
+  accessToken: string,
+  spreadsheetId: string,
+  expense: ScheduledExpense
+): Promise<void> {
+  await ensureScheduledSheetsExists(accessToken, spreadsheetId).catch(() => {});
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/GastosProgramados!A:J:append?valueInputOption=USER_ENTERED`;
+  const row = [
+    expense.id,
+    expense.description,
+    expense.amount,
+    expense.category,
+    expense.type,
+    expense.recurrence,
+    expense.dueDate,
+    expense.autoDebit ? 'SI' : 'NO',
+    expense.paymentMethod || 'Débito Automático',
+    expense.status || 'pendiente',
+  ];
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ values: [row] }),
+  });
+
+  if (!res.ok) {
+    if (res.status === 403) {
+      throw new Error('Permiso denegado: tu cuenta de Google tiene rol de Lector. Solicita rol de Editor para registrar pagos programados.');
+    }
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error?.message || 'Error al guardar gasto programado en Google Sheets');
+  }
+}
+
+/**
+ * Agrega un ingreso programado directamente a Google Sheets
+ */
+export async function appendScheduledIncomeDirect(
+  accessToken: string,
+  spreadsheetId: string,
+  income: ScheduledIncome
+): Promise<void> {
+  await ensureScheduledSheetsExists(accessToken, spreadsheetId).catch(() => {});
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/IngresosProgramados!A:H:append?valueInputOption=USER_ENTERED`;
+  const row = [
+    income.id,
+    income.description,
+    income.amount,
+    income.category,
+    income.recurrence,
+    income.expectedDate,
+    income.paymentMethod || 'Transferencia',
+    income.status || 'pendiente',
+  ];
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ values: [row] }),
+  });
+
+  if (!res.ok) {
+    if (res.status === 403) {
+      throw new Error('Permiso denegado: tu cuenta de Google tiene rol de Lector. Solicita rol de Editor para registrar cobros programados.');
+    }
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error?.message || 'Error al guardar ingreso programado en Google Sheets');
   }
 }
 

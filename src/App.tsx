@@ -10,6 +10,7 @@ import { ExpensesList } from './components/ExpensesList';
 import { IncomesList } from './components/IncomesList';
 import { InvestmentsTab } from './components/InvestmentsTab';
 import { SavingsTab } from './components/SavingsTab';
+import { ScheduledTransactionsTab } from './components/ScheduledTransactionsTab';
 import { ExpenseFormModal } from './components/ExpenseFormModal';
 import { IncomeFormModal } from './components/IncomeFormModal';
 import { SettingsModal } from './components/SettingsModal';
@@ -131,6 +132,8 @@ export function AppContent() {
             onNavigateTab={(tab) => setActiveTab(tab)}
           />
         )}
+
+        {activeTab === 'scheduled' && <ScheduledTransactionsTab />}
 
         {activeTab === 'incomes' && (
           <IncomesList onOpenIncomeModal={() => setIsIncomeModalOpen(true)} />

@@ -22,6 +22,8 @@ interface AiAdvisorChatProps {
 }
 
 const QUICK_QUESTIONS = [
+  '¿Qué se me debita esta semana?',
+  'Programá el débito de Netflix 8.000 el 15',
   'Anotá un gasto de $ 15.000 en el súper',
   'Cobré 450.000 de sueldo',
   '¿Cuánto debería ganar por día para llegar a la meta?',
@@ -36,6 +38,8 @@ export const AiAdvisorChat: React.FC<AiAdvisorChatProps> = ({ isOpen, onClose })
     incomes,
     savings,
     investments,
+    scheduledExpenses,
+    scheduledIncomes,
     config,
     googleUser,
     loginWithGoogle,
@@ -51,13 +55,17 @@ export const AiAdvisorChat: React.FC<AiAdvisorChatProps> = ({ isOpen, onClose })
     addInvestment,
     deleteInvestment,
     updateConfig,
+    addScheduledExpense,
+    addScheduledIncome,
+    executeScheduledExpense,
+    executeScheduledIncome,
   } = useFinance();
 
   const getWelcomeText = (user: typeof googleUser) => {
     if (!user || !user.name) {
       return `¡Hola! Soy GASTON, tu agente y asesor financiero inteligente.
 
-Puedo registrar gastos fijos y variables, cobros e ingresos, metas de ahorro y fondos de emergencia. Además, calculo tu nivel de confort financiero (50/30/20), automatizo cuánto deberías ganar por día para llegar a tu meta y analizo tus ventas semanales por categoría.
+Puedo registrar gastos fijos y variables, cobros e ingresos, débitos programados y vencimientos, metas de ahorro y fondos de emergencia. Además, calculo tu nivel de confort financiero (50/30/20), automatizo cuánto deberías ganar por día para llegar a tu meta y analizo tus ventas semanales por categoría.
 
 Tus datos están protegidos en este dispositivo. Si querés sincronizar con tu Google Drive y Sheets, podés iniciar sesión con Google cuando gustes.
 
@@ -67,6 +75,7 @@ Tus datos están protegidos en este dispositivo. Si querés sincronizar con tu G
     return `¡Hola, ${firstName}! Soy GASTON, tu agente y asesor financiero autónomo.
 
 Todo lo que me pidas se procesará y ejecutará automáticamente en tu aplicación y en tu Google Sheets:
+• "¿Qué se me debita esta semana?" o "Programá el débito de Netflix 8.000 el 15"
 • "Anotá un gasto de 15.000 en el súper" o "Pagué 180k de alquiler"
 • "Cobré 450.000 de sueldo" o "Ahorré 50k para el fondo de emergencia"
 • "¿Cuánto debería ganar por día para llegar a la meta?"
@@ -203,6 +212,8 @@ Todo lo que me pidas se procesará y ejecutará automáticamente en tu aplicaci�
         incomes,
         savings,
         investments,
+        scheduledExpenses,
+        scheduledIncomes,
         config,
         googleUser,
         addExpense,
@@ -217,6 +228,10 @@ Todo lo que me pidas se procesará y ejecutará automáticamente en tu aplicaci�
         addInvestment,
         deleteInvestment,
         updateConfig,
+        addScheduledExpense,
+        addScheduledIncome,
+        executeScheduledExpense,
+        executeScheduledIncome,
       };
 
       // 1. Procesar con el motor semántico de CRUD y aprendizaje continuo
@@ -232,7 +247,10 @@ Todo lo que me pidas se procesará y ejecutará automáticamente en tu aplicaci�
           execResult.actionExecuted.type === 'CREATE_INCOME' ||
           execResult.actionExecuted.type === 'CREATE_GOAL' ||
           execResult.actionExecuted.type === 'ALLOCATE_SAVINGS' ||
-          execResult.actionExecuted.type === 'UPDATE_EMERGENCY_FUND'
+          execResult.actionExecuted.type === 'UPDATE_EMERGENCY_FUND' ||
+          execResult.actionExecuted.type === 'SCHEDULE_EXPENSE' ||
+          execResult.actionExecuted.type === 'SCHEDULE_INCOME' ||
+          execResult.actionExecuted.type === 'EXECUTE_SCHEDULED'
         ) {
           confetti({ particleCount: 40, spread: 45, origin: { y: 0.7 } });
         }
