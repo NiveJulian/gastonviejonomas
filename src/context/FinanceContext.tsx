@@ -770,6 +770,15 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
       })
     );
 
+    if (googleUser && config.googleSpreadsheetId && updatedGoal) {
+      try {
+        await deleteRowDirect(googleUser.accessToken, config.googleSpreadsheetId, 'Ahorros', id);
+        await appendSavingsDirect(googleUser.accessToken, config.googleSpreadsheetId, updatedGoal);
+      } catch (err) {
+        console.warn('Error actualizando meta de ahorro en Google Sheets:', err);
+      }
+    }
+
     if (config.appsScriptUrl && updatedGoal) {
       try {
         await postSavingsToSheet(config.appsScriptUrl, updatedGoal);
