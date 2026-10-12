@@ -1,5 +1,6 @@
-import type { Expense, Income, SavingsGoal, Investment, AppConfig, GoogleUser, ExpenseCategory, IncomeCategory } from '../types/finance';
+import type { Expense, Income, SavingsGoal, Investment, AppConfig, GoogleUser, ExpenseCategory, IncomeCategory, ExpenseType } from '../types/finance';
 import { calculateFinancialTotals } from '../utils/rulesEngine';
+import { calculateComfortAnalysis } from '../utils/comfortCalculator';
 import { formatMoney } from '../utils/helpers';
 import {
   inferExpenseCategory,
@@ -31,6 +32,7 @@ export interface AgentExecutionContext {
   deleteSavingsGoal?: (id: string) => Promise<void>;
   addInvestment?: (investment: Omit<Investment, 'id'>) => Promise<void>;
   deleteInvestment?: (id: string) => Promise<void>;
+  updateConfig?: (newConfig: Partial<AppConfig>) => Promise<void>;
 }
 
 export interface AgentExecutionResult {
@@ -46,6 +48,11 @@ export interface AgentExecutionResult {
       | 'CREATE_GOAL'
       | 'UPDATE_GOAL'
       | 'DELETE_GOAL'
+      | 'ALLOCATE_SAVINGS'
+      | 'UPDATE_EMERGENCY_FUND'
+      | 'CALCULATE_COMFORT'
+      | 'CALCULATE_DAILY_TARGET'
+      | 'ANALYZE_WEEKLY_SALES'
       | 'CREATE_INVESTMENT'
       | 'LEARN_RULE'
       | 'QUERY';
@@ -137,6 +144,7 @@ function cleanDescription(text: string, amount: number): string {
   let clean = text
     .replace(/(?:por favor|che|gaston|gastón|anot[aá]|registr[aá]|carg[aá]|ingres[aá]|agreg[aá]|anotame|cargame|anota|registra|carga|guarda|guardame)/gi, '')
     .replace(/(?:un gasto de|un ingreso de|gasto de|ingreso de|gaste|gasté|pague|pagué|cobre|cobré|compre|compré|en concepto de|para)/gi, '')
+    .replace(/(?:un gasto fijo de|gasto fijo de|gasto fijo|fijo de)/gi, '')
     .replace(/\b(?:pesos|mangos|ars|lucas|palos|k|mil)\b/gi, '')
     .trim();
 
@@ -148,12 +156,38 @@ function cleanDescription(text: string, amount: number): string {
     clean = clean.replace(new RegExp(`\\$?\\s*${formattedWithDot.replace(/\./g, '\\.')}`, 'g'), '');
   }
 
-  clean = clean.replace(/^[:\-\s,]+|[:\-\s,]+$/g, '').trim();
+  clean = clean.replace(/\b\d+(?:[.,]\d+)?\b/g, '');
+  clean = clean.replace(/\s+/g, ' ').replace(/^[:\-\s,]+|[:\-\s,]+$/g, '').trim();
   // Capitalizar primera letra
   if (clean.length > 0) {
     return clean.charAt(0).toUpperCase() + clean.slice(1);
   }
   return 'Varios';
+}
+
+/**
+ * Limpia y extrae el nombre de una meta de ahorro o fondo
+ */
+function cleanGoalName(text: string, amount: number): string {
+  let clean = text
+    .replace(/(?:por favor|che|gaston|gastón|crear|armar|nueva meta|meta de ahorro|meta|objetivo|fondo de emergencia|fondo de reserva)/gi, '')
+    .replace(/(?:de ahorro para|para|de|un|una)/gi, '')
+    .replace(/\b(?:pesos|mangos|ars|lucas|palos|k|mil)\b/gi, '')
+    .trim();
+
+  if (amount > 0) {
+    const amountStr = amount.toString();
+    clean = clean.replace(new RegExp(`\\$?\\s*${amountStr}`, 'g'), '');
+    const formattedWithDot = amount.toLocaleString('es-AR');
+    clean = clean.replace(new RegExp(`\\$?\\s*${formattedWithDot.replace(/\./g, '\\.')}`, 'g'), '');
+  }
+
+  clean = clean.replace(/\b\d+(?:[.,]\d+)?\b/g, '');
+  clean = clean.replace(/\s+/g, ' ').replace(/^[:\-\s,]+|[:\-\s,]+$/g, '').trim();
+  if (clean.length > 0) {
+    return clean.charAt(0).toUpperCase() + clean.slice(1);
+  }
+  return 'Meta Financiera';
 }
 
 /**
@@ -171,8 +205,13 @@ export async function processAgentInstruction(
   const userName = ctx.googleUser?.name ? ctx.googleUser.name.split(' ')[0] : 'Campeón';
 
   const now = new Date();
+  const todayStr = now.toISOString().split('T')[0];
+  const currentMonthPrefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
   const totalDaysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
   const daysRemainingInMonth = Math.max(1, totalDaysInMonth - now.getDate());
+
+  const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const sevenDaysAgoStr = sevenDaysAgo.toISOString().split('T')[0];
 
   // ---------------------------------------------------------------------------
   // 1. DELETE / DESHACER (Eliminar último registro o gasto/ingreso específico)
@@ -390,8 +429,424 @@ export async function processAgentInstruction(
     }
   }
 
+  const amountFound = extractAmount(prompt);
+
   // ---------------------------------------------------------------------------
-  // 4. CREATE: REGISTRO DE INGRESO
+  // 4. CALCULATE_COMFORT: ANÁLISIS DE CONFORT Y REGLA 50/30/20
+  // ---------------------------------------------------------------------------
+  const isComfortIntent =
+    lower.includes('confort') ||
+    lower.includes('50/30/20') ||
+    lower.includes('50 30 20') ||
+    lower.includes('regla de oro') ||
+    (lower.includes('cuanto') && lower.includes('ganar') && (lower.includes('comodo') || lower.includes('cómodo')));
+
+  if (isComfortIntent) {
+    const comfort = calculateComfortAnalysis(ctx.expenses, ctx.savings, ctx.config, ctx.incomes);
+    const currentLevel = comfort.levels.find((l) => l.isCurrentStatus) || comfort.levels[0];
+    const ideal = comfort.goldenRuleRecommendation.idealMonthlyIncome;
+    const gap = comfort.goldenRuleRecommendation.gapToGoldenComfort;
+    const essentials = comfort.essentialNeeds;
+    const monthlyInc = comfort.monthlyIncome;
+
+    const gapStatus =
+      gap === 0
+        ? `🎉 ¡Felicitaciones! Tu nivel de ingresos cubre plenamente el estándar de Confort Dorado.`
+        : `Tu brecha para alcanzar el Confort Dorado es de ${formatMoney(gap, currency)} mensuales.`;
+
+    const reply = `Análisis de Confort Financiero para ${userName}:
+
+• Estado actual: ${currentLevel.name} (${comfort.currentComfortPercent}% del estándar óptimo)
+• Gastos esenciales mensuales: ${formatMoney(essentials, currency)}
+• Ingreso ideal de Confort Dorado (50/30/20): ${formatMoney(ideal, currency)}
+• ${gapStatus}
+
+Distribución recomendada (Regla 50/30/20 sobre tu ingreso de ${formatMoney(monthlyInc, currency)}):
+• 50% Necesidades esenciales: ${formatMoney(monthlyInc * 0.5, currency)} (consumís ${formatMoney(essentials, currency)})
+• 30% Estilo de vida y confort: ${formatMoney(monthlyInc * 0.3, currency)}
+• 20% Ahorro e inversión futura: ${formatMoney(monthlyInc * 0.2, currency)}`;
+
+    return {
+      reply,
+      actionExecuted: {
+        type: 'CALCULATE_COMFORT',
+        summary: `Confort: ${currentLevel.name} (${comfort.currentComfortPercent}%)`,
+        data: comfort,
+      },
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // 5. CALCULATE_DAILY_TARGET: PLANIFICADOR DE META DIARIA DE INGRESOS
+  // ---------------------------------------------------------------------------
+  const isDailyTargetIntent =
+    ((lower.includes('cuanto') || lower.includes('cuánto')) &&
+      (lower.includes('deberia') || lower.includes('debería') || lower.includes('tengo que') || lower.includes('hay que')) &&
+      (lower.includes('dia') || lower.includes('día')) &&
+      (lower.includes('ganar') || lower.includes('facturar') || lower.includes('vender') || lower.includes('llegar') || lower.includes('meta'))) ||
+    lower.includes('meta diaria') ||
+    lower.includes('cuanto ganar por dia') ||
+    lower.includes('cuánto ganar por día') ||
+    (lower.includes('diario') && lower.includes('para llegar a la meta'));
+
+  if (isDailyTargetIntent) {
+    const monthIncomes = ctx.incomes.filter((i) => (i.date || '').startsWith(currentMonthPrefix));
+    const earnedThisMonth = monthIncomes.reduce((s, i) => s + Number(i.amount || 0), 0);
+
+    const comfort = calculateComfortAnalysis(ctx.expenses, ctx.savings, ctx.config, ctx.incomes);
+    const comfortTarget = comfort.goldenRuleRecommendation.idealMonthlyIncome;
+
+    const targetMonthly =
+      amountFound > 0
+        ? amountFound
+        : comfortTarget > 0
+        ? comfortTarget
+        : ctx.config.monthlyIncome > 0
+        ? ctx.config.monthlyIncome
+        : Math.max(1000000, Math.round(totals.effectiveMonthlyIncome * 1.2));
+
+    const remainingToGoal = Math.max(0, targetMonthly - earnedThisMonth);
+    const dailyTarget = Math.ceil(remainingToGoal / daysRemainingInMonth);
+
+    const statusMsg =
+      remainingToGoal === 0
+        ? `🎉 ¡Objetivo mensual alcanzado anticipadamente! Todo ingreso adicional pasa a multiplicar tus ahorros e inversiones.`
+        : `Para alcanzar tu meta mensual, necesitás promediar ${formatMoney(dailyTarget, currency)}/día durante los ${daysRemainingInMonth} días restantes del mes.`;
+
+    const reply = `Plan de Meta Diaria Automatizada, ${userName}:
+
+🎯 Meta mensual objetivo: ${formatMoney(targetMonthly, currency)}
+• Ya ingresado este mes: ${formatMoney(earnedThisMonth, currency)}
+• Restante por generar: ${formatMoney(remainingToGoal, currency)}
+• Días restantes del mes: ${daysRemainingInMonth} días
+
+👉 Ritmo diario requerido: ${formatMoney(dailyTarget, currency)}/día
+${statusMsg}`;
+
+    return {
+      reply,
+      actionExecuted: {
+        type: 'CALCULATE_DAILY_TARGET',
+        summary: `Meta diaria: ${formatMoney(dailyTarget, currency)}/día (Objetivo: ${formatMoney(targetMonthly, currency)})`,
+        data: { targetMonthly, earnedThisMonth, remainingToGoal, dailyTarget, daysRemainingInMonth },
+      },
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // 6. ANALYZE_WEEKLY_SALES: VENTAS E INGRESOS SEMANALES POR CATEGORÍA
+  // ---------------------------------------------------------------------------
+  const isWeeklySalesIntent =
+    ((lower.includes('vendi') || lower.includes('vendí') || lower.includes('vendiendo') || lower.includes('venta') || lower.includes('ventas')) &&
+      (lower.includes('semana') || lower.includes('semanal') || lower.includes('ultimos 7') || lower.includes('últimos 7'))) ||
+    ((lower.includes('categoria') || lower.includes('categoría')) &&
+      (lower.includes('ingres') || lower.includes('venta') || lower.includes('vendi') || lower.includes('semana'))) ||
+    lower.includes('segun la categoria') ||
+    lower.includes('según la categoría') ||
+    lower.includes('ventas por categoria') ||
+    lower.includes('ventas por categoría');
+
+  if (isWeeklySalesIntent) {
+    const weeklyIncomes = ctx.incomes.filter((i) => (i.date || '') >= sevenDaysAgoStr);
+    const totalWeekly = weeklyIncomes.reduce((s, i) => s + Number(i.amount || 0), 0);
+    const dailyAverage = Math.round(totalWeekly / 7);
+
+    if (weeklyIncomes.length === 0) {
+      return {
+        reply: `En los últimos 7 días no tenés ventas ni ingresos registrados, ${userName}. Si concretaste cobros recientes, decime "Cobré [monto] de [concepto]" y los asiento al instante.`,
+        actionExecuted: {
+          type: 'ANALYZE_WEEKLY_SALES',
+          summary: 'Ventas de la semana: $ 0 (Sin registros)',
+        },
+      };
+    }
+
+    const byCategory: Record<string, { total: number; count: number }> = {};
+    for (const inc of weeklyIncomes) {
+      const cat = inc.category || 'Otros Ingresos';
+      if (!byCategory[cat]) byCategory[cat] = { total: 0, count: 0 };
+      byCategory[cat].total += Number(inc.amount || 0);
+      byCategory[cat].count += 1;
+    }
+
+    const sortedCats = Object.entries(byCategory).sort((a, b) => b[1].total - a[1].total);
+    const breakdownLines = sortedCats
+      .map(([cat, data]) => {
+        const pct = totalWeekly > 0 ? Math.round((data.total / totalWeekly) * 100) : 0;
+        return `• ${cat}: ${formatMoney(data.total, currency)} (${pct}%, ${data.count} operación${data.count === 1 ? '' : 'es'})`;
+      })
+      .join('\n');
+
+    const topCategory = sortedCats[0];
+    const topPct = totalWeekly > 0 ? Math.round((topCategory[1].total / totalWeekly) * 100) : 0;
+
+    const reply = `Análisis de ventas e ingresos semanales, ${userName}:
+
+📊 Total últimos 7 días: ${formatMoney(totalWeekly, currency)} (Promedio: ${formatMoney(dailyAverage, currency)}/día)
+
+Rendimiento por categoría:
+${breakdownLines}
+
+🔥 Categoría líder: "${topCategory[0]}" concentró el ${topPct}% de tus ingresos en la semana.`;
+
+    return {
+      reply,
+      actionExecuted: {
+        type: 'ANALYZE_WEEKLY_SALES',
+        summary: `Ventas de la semana: ${formatMoney(totalWeekly, currency)} (${sortedCats.length} categorías)`,
+        data: { totalWeekly, dailyAverage, byCategory },
+      },
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // 7. TEMPORAL FLOW QUERIES: ¿CUÁNTO INGRESÓ? ¿CUÁNTO SE GASTÓ? (HOY / SEMANA / MES)
+  // ---------------------------------------------------------------------------
+  const isTemporalFlowIntent =
+    (lower.includes('cuanto') || lower.includes('cuánto')) &&
+    (lower.includes('ingres') || lower.includes('entr') || lower.includes('gast') || lower.includes('sal')) &&
+    (lower.includes('hoy') ||
+      lower.includes('semana') ||
+      lower.includes('mes') ||
+      lower.includes('este mes') ||
+      lower.includes('esta semana') ||
+      lower.includes('en el mes') ||
+      lower.includes('en la semana')) &&
+    !lower.includes('puedo') &&
+    !lower.includes('deberia') &&
+    !lower.includes('debería');
+
+  if (isTemporalFlowIntent) {
+    const isToday = lower.includes('hoy');
+    const isWeek = lower.includes('semana');
+    const periodLabel = isToday ? 'hoy' : isWeek ? 'esta semana (últimos 7 días)' : 'este mes';
+
+    const periodIncomes = ctx.incomes.filter((i) => {
+      const d = i.date || '';
+      if (isToday) return d === todayStr;
+      if (isWeek) return d >= sevenDaysAgoStr;
+      return d.startsWith(currentMonthPrefix);
+    });
+
+    const periodExpenses = ctx.expenses.filter((e) => {
+      const d = e.date || '';
+      if (isToday) return d === todayStr;
+      if (isWeek) return d >= sevenDaysAgoStr;
+      return d.startsWith(currentMonthPrefix);
+    });
+
+    const totalPeriodIncome = periodIncomes.reduce((s, i) => s + Number(i.amount || 0), 0);
+    const totalPeriodExpense = periodExpenses.reduce((s, e) => s + Number(e.amount || 0), 0);
+    const netPeriodBalance = totalPeriodIncome - totalPeriodExpense;
+
+    const asksOnlyIncome =
+      (lower.includes('ingres') || lower.includes('entr')) &&
+      !lower.includes('gast') &&
+      !lower.includes('sal');
+
+    const asksOnlyExpense =
+      (lower.includes('gast') || lower.includes('sal')) &&
+      !lower.includes('ingres') &&
+      !lower.includes('entr');
+
+    let reply = '';
+    if (asksOnlyIncome) {
+      reply = `Resumen de ingresos para ${periodLabel}, ${userName}:
+• Total ingresado: ${formatMoney(totalPeriodIncome, currency)} (${periodIncomes.length} movimiento${periodIncomes.length === 1 ? '' : 's'}).
+• Contra gastos de: ${formatMoney(totalPeriodExpense, currency)}.
+• Balance neto del período: ${netPeriodBalance >= 0 ? '+' : ''}${formatMoney(netPeriodBalance, currency)}.`;
+    } else if (asksOnlyExpense) {
+      reply = `Resumen de gastos para ${periodLabel}, ${userName}:
+• Total gastado: ${formatMoney(totalPeriodExpense, currency)} (${periodExpenses.length} registro${periodExpenses.length === 1 ? '' : 's'}).
+• Ingresos registrados: ${formatMoney(totalPeriodIncome, currency)}.
+• Balance neto del período: ${netPeriodBalance >= 0 ? '+' : ''}${formatMoney(netPeriodBalance, currency)}.`;
+    } else {
+      reply = `Flujo de caja para ${periodLabel}, ${userName}:
+• 🟢 Ingresos: ${formatMoney(totalPeriodIncome, currency)} (${periodIncomes.length} movimientos)
+• 🔴 Gastos: ${formatMoney(totalPeriodExpense, currency)} (${periodExpenses.length} movimientos)
+• ⚖️ Balance neto: ${netPeriodBalance >= 0 ? '+' : ''}${formatMoney(netPeriodBalance, currency)}.`;
+    }
+
+    return {
+      reply,
+      actionExecuted: {
+        type: 'QUERY',
+        summary: `Flujo ${periodLabel}: In +${formatMoney(totalPeriodIncome, currency)} / Out -${formatMoney(totalPeriodExpense, currency)}`,
+        data: { totalPeriodIncome, totalPeriodExpense, netPeriodBalance },
+      },
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // 8. SAVINGS & EMERGENCY FUND: REGISTRO DE METAS, AHORROS Y FONDO DE EMERGENCIA
+  // ---------------------------------------------------------------------------
+  // 8A. Configuración o creación de Fondo de Emergencia
+  const isEmergencyFundSetup =
+    (lower.includes('emergencia') || lower.includes('reserva') || lower.includes('blindaje')) &&
+    (lower.includes('crear') || lower.includes('armar') || lower.includes('poner') || lower.includes('configur') || lower.includes('definir') || lower.includes('nueva meta') || lower.includes('meta de'));
+
+  if (isEmergencyFundSetup) {
+    const targetAmt = amountFound > 0 ? amountFound : Math.max(500000, totals.currentMonthFixedExpenses * 3);
+    if (ctx.updateConfig) {
+      await ctx.updateConfig({ emergencyFundMinimum: targetAmt });
+    }
+
+    const existingEf = ctx.savings.find((s) => s.isEmergencyFund);
+    if (existingEf) {
+      return {
+        reply: `Fondo de Emergencia actualizado, ${userName}: configuré el objetivo en ${formatMoney(
+          targetAmt,
+          currency
+        )}. Tu saldo actual acumulado en este fondo es de ${formatMoney(existingEf.currentAmount, currency)}.`,
+        actionExecuted: {
+          type: 'UPDATE_EMERGENCY_FUND',
+          summary: `Fondo de Emergencia fijado en ${formatMoney(targetAmt, currency)}`,
+          entityId: existingEf.id,
+          data: { targetAmount: targetAmt },
+        },
+      };
+    } else {
+      await ctx.addSavingsGoal({
+        name: 'Fondo de Emergencia',
+        isEmergencyFund: true,
+        targetAmount: targetAmt,
+        currentAmount: 0,
+        notes: 'Fondo intocable para imprevistos y blindaje financiero',
+      });
+
+      return {
+        reply: `Fondo de Emergencia creado y blindado, ${userName}: establecí la meta en ${formatMoney(
+          targetAmt,
+          currency
+        )}. Podés destinarle dinero diciéndome por ejemplo "Ahorré 50k para el fondo de emergencia".`,
+        actionExecuted: {
+          type: 'UPDATE_EMERGENCY_FUND',
+          summary: `Fondo de Emergencia creado: ${formatMoney(targetAmt, currency)}`,
+        },
+      };
+    }
+  }
+
+  // 8B. Asignación de aporte de ahorro a meta o fondo de emergencia
+  const isSavingsAllocation =
+    amountFound > 0 &&
+    (lower.includes('ahorr') || lower.includes('sum') || lower.includes('apart') || lower.includes('destin') || lower.includes('mand') || lower.includes('guard')) &&
+    (lower.includes('para') || lower.includes('a la meta') || lower.includes('al fondo') || lower.includes('en el fondo') || lower.includes('al ahorro') || lower.includes('emergencia'));
+
+  if (isSavingsAllocation) {
+    const isForEmergency = lower.includes('emergencia') || lower.includes('reserva');
+    let targetGoal = isForEmergency
+      ? ctx.savings.find((s) => s.isEmergencyFund)
+      : ctx.savings.find(
+          (s) =>
+            !s.isEmergencyFund &&
+            (lower.includes(s.name.toLowerCase()) ||
+              s.name
+                .toLowerCase()
+                .split(' ')
+                .some((word) => word.length >= 3 && lower.includes(word)))
+        );
+
+    if (!targetGoal && !isForEmergency && ctx.savings.length > 0) {
+      const nonEfGoals = ctx.savings.filter((s) => !s.isEmergencyFund);
+      if (nonEfGoals.length === 1) {
+        targetGoal = nonEfGoals[0];
+      }
+    }
+
+    if (targetGoal && ctx.updateSavingsAmount) {
+      const newAmount = Number(targetGoal.currentAmount || 0) + amountFound;
+      await ctx.updateSavingsAmount(targetGoal.id, newAmount);
+
+      const targetAmt = targetGoal.targetAmount || 1;
+      const pct = Math.min(100, Math.round((newAmount / targetAmt) * 100));
+      const remaining = Math.max(0, targetAmt - newAmount);
+
+      const successNote =
+        remaining === 0
+          ? `🎉 ¡Felicitaciones! Llegaste al 100% de esta meta.`
+          : `Te restan ${formatMoney(remaining, currency)} para completarla.`;
+
+      return {
+        reply: `Aporte de ahorro registrado, ${userName}: asigné ${formatMoney(
+          amountFound,
+          currency
+        )} a "${targetGoal.name}". Llevás acumulado ${formatMoney(
+          newAmount,
+          currency
+        )} de ${formatMoney(targetGoal.targetAmount, currency)} (${pct}% completado). ${successNote}`,
+        actionExecuted: {
+          type: 'ALLOCATE_SAVINGS',
+          summary: `Aporte a meta: ${targetGoal.name} (+${formatMoney(amountFound, currency)})`,
+          entityId: targetGoal.id,
+          data: { newAmount, targetGoal },
+        },
+      };
+    } else {
+      const goalName = cleanGoalName(prompt, amountFound);
+      const initialTarget = amountFound * 5;
+      await ctx.addSavingsGoal({
+        name: goalName,
+        isEmergencyFund: isForEmergency,
+        targetAmount: initialTarget,
+        currentAmount: amountFound,
+        notes: 'Creada a partir de asignación de ahorro',
+      });
+
+      return {
+        reply: `Meta creada y fondeada, ${userName}: definí "${goalName}" con meta tentativa de ${formatMoney(
+          initialTarget,
+          currency
+        )} y le asigné tus primeros ${formatMoney(amountFound, currency)} ahorrados.`,
+        actionExecuted: {
+          type: 'CREATE_GOAL',
+          summary: `Meta creada con ahorro: ${goalName} (${formatMoney(amountFound, currency)})`,
+        },
+      };
+    }
+  }
+
+  // 8C. Crear meta de ahorro general
+  const isGoalCreation =
+    (lower.includes('meta') || lower.includes('ahorro')) &&
+    (lower.includes('crear') || lower.includes('armar') || lower.includes('nueva meta') || lower.includes('definir'));
+
+  if (isGoalCreation) {
+    const targetAmt = amountFound > 0 ? amountFound : 100000;
+    const goalName = cleanGoalName(prompt, targetAmt);
+
+    await ctx.addSavingsGoal({
+      name: goalName,
+      isEmergencyFund: false,
+      targetAmount: targetAmt,
+      currentAmount: 0,
+      notes: 'Creada por Agente GASTONAPP',
+    });
+
+    recordAgentAction({
+      type: 'savings_goal',
+      entityId: 'goal_' + Date.now(),
+      description: goalName,
+      amount: targetAmt,
+      date: todayStr,
+      rawPrompt: prompt,
+    });
+
+    return {
+      reply: `Meta creada con éxito, ${userName}: definí "${goalName}" con objetivo de ${formatMoney(
+        targetAmt,
+        currency
+      )}. Ya podés asignarle fondos diciéndome "Ahorré [monto] para ${goalName}".`,
+      actionExecuted: {
+        type: 'CREATE_GOAL',
+        summary: `Meta de ahorro creada: ${goalName} (${formatMoney(targetAmt, currency)})`,
+        data: { name: goalName, targetAmount: targetAmt },
+      },
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // 9. CREATE: REGISTRO DE INGRESO
   // ---------------------------------------------------------------------------
   const isIncomeIntent =
     (lower.includes('ingreso') ||
@@ -407,37 +862,34 @@ export async function processAgentInstruction(
     !lower.includes('puedo');
 
   if (isIncomeIntent) {
-    const amount = extractAmount(prompt);
-    if (amount > 0 && ctx.addIncome) {
-      const desc = cleanDescription(prompt, amount) || 'Ingreso registrado';
+    if (amountFound > 0 && ctx.addIncome) {
+      const desc = cleanDescription(prompt, amountFound) || 'Ingreso registrado';
       const category = inferIncomeCategory(prompt);
-      const dateStr = new Date().toISOString().split('T')[0];
 
       await ctx.addIncome({
-        date: dateStr,
+        date: todayStr,
         description: desc,
-        amount,
+        amount: amountFound,
         category,
         paymentMethod: 'Transferencia / Efectivo',
         notes: `Registrado autónomamente por Agente GASTONAPP`,
       });
 
-      const newIncomeTotal = (totals.currentMonthTotalIncomes || totals.effectiveMonthlyIncome) + amount;
-      const newFreeCash = totals.freeCashFlow + amount;
+      const newFreeCash = totals.freeCashFlow + amountFound;
 
       recordAgentAction({
         type: 'income',
         entityId: 'inc_' + Date.now(),
         description: desc,
-        amount,
+        amount: amountFound,
         category,
-        date: dateStr,
+        date: todayStr,
         rawPrompt: prompt,
       });
 
       return {
         reply: `Ingreso registrado impecablemente, ${userName}: asenté ${formatMoney(
-          amount,
+          amountFound,
           currency
         )} bajo "${category}" (${desc}). Tu saldo disponible asciende ahora a ${formatMoney(
           newFreeCash,
@@ -445,15 +897,15 @@ export async function processAgentInstruction(
         )}.`,
         actionExecuted: {
           type: 'CREATE_INCOME',
-          summary: `Ingreso creado: ${desc} por ${formatMoney(amount, currency)}`,
-          data: { amount, description: desc, category },
+          summary: `Ingreso creado: ${desc} por ${formatMoney(amountFound, currency)}`,
+          data: { amount: amountFound, description: desc, category },
         },
       };
     }
   }
 
   // ---------------------------------------------------------------------------
-  // 5. CREATE: REGISTRO DE GASTO
+  // 10. CREATE: REGISTRO DE GASTO (Fijo vs Variable)
   // ---------------------------------------------------------------------------
   const isExpenseRegisterIntent =
     lower.includes('anot') ||
@@ -467,22 +919,29 @@ export async function processAgentInstruction(
     lower.startsWith('pague') ||
     lower.startsWith('pagué');
 
-  const amountFound = extractAmount(prompt);
-
-  // Si tiene monto y no es una mera pregunta de evaluación ("¿puedo gastar...?")
-  const isOnlyEvaluating = (lower.includes('puedo') || lower.includes('alcanza') || lower.includes('conviene')) && !lower.includes('anota') && !lower.includes('registra') && !lower.includes('gaste') && !lower.includes('pague');
+  const isOnlyEvaluating =
+    (lower.includes('puedo') || lower.includes('alcanza') || lower.includes('conviene')) &&
+    !lower.includes('anota') &&
+    !lower.includes('registra') &&
+    !lower.includes('gaste') &&
+    !lower.includes('pague');
 
   if (isExpenseRegisterIntent && amountFound > 0 && !isOnlyEvaluating) {
     const desc = cleanDescription(prompt, amountFound) || 'Gasto registrado';
     const category = inferExpenseCategory(desc);
-    const dateStr = new Date().toISOString().split('T')[0];
+
+    const isFixed = /\b(fijo|fijos|alquiler|expensas|servicio|servicios|abono|seguro|cuota fija|colegio|internet|luz|gas|agua|patente|gimnasio)\b/i.test(
+      lower
+    );
+
+    const expenseType: ExpenseType = isFixed ? 'fijo' : 'variable';
 
     await ctx.addExpense({
-      date: dateStr,
+      date: todayStr,
       description: desc,
       amount: amountFound,
       category,
-      type: 'variable',
+      type: expenseType,
       paymentMethod: 'Tarjeta / Efectivo',
       notes: `Registrado autónomamente por Agente GASTONAPP`,
     });
@@ -496,12 +955,12 @@ export async function processAgentInstruction(
       description: desc,
       amount: amountFound,
       category,
-      date: dateStr,
+      date: todayStr,
       rawPrompt: prompt,
     });
 
     return {
-      reply: `Gasto registrado, ${userName}: cargué ${formatMoney(
+      reply: `Gasto ${expenseType === 'fijo' ? 'fijo esencial' : 'variable'} registrado, ${userName}: cargué ${formatMoney(
         amountFound,
         currency
       )} en "${category}" (${desc}). Te quedan ${formatMoney(
@@ -510,44 +969,8 @@ export async function processAgentInstruction(
       )} libres (${formatMoney(dailyAfter, currency)}/día para los ${daysRemainingInMonth} días restantes).`,
       actionExecuted: {
         type: 'CREATE_EXPENSE',
-        summary: `Gasto creado: ${desc} por ${formatMoney(amountFound, currency)}`,
-        data: { amount: amountFound, description: desc, category },
-      },
-    };
-  }
-
-  // ---------------------------------------------------------------------------
-  // 6. CREATE: META DE AHORRO
-  // ---------------------------------------------------------------------------
-  if ((lower.includes('meta') || lower.includes('ahorro')) && (lower.includes('crear') || lower.includes('armar') || lower.includes('nueva meta'))) {
-    const targetAmt = amountFound > 0 ? amountFound : 100000;
-    const goalName = cleanDescription(prompt, targetAmt) || 'Nueva Meta de Ahorro';
-
-    await ctx.addSavingsGoal({
-      name: goalName,
-      isEmergencyFund: false,
-      targetAmount: targetAmt,
-      currentAmount: 0,
-      notes: 'Creada por Agente GASTONAPP',
-    });
-
-    recordAgentAction({
-      type: 'savings_goal',
-      entityId: 'goal_' + Date.now(),
-      description: goalName,
-      amount: targetAmt,
-      date: new Date().toISOString().split('T')[0],
-      rawPrompt: prompt,
-    });
-
-    return {
-      reply: `Meta creada con éxito, ${userName}: definí "${goalName}" con objetivo de ${formatMoney(
-        targetAmt,
-        currency
-      )}. Ya podés asignarle fondos desde la sección Ahorros.`,
-      actionExecuted: {
-        type: 'CREATE_GOAL',
-        summary: `Meta de ahorro creada: ${goalName} (${formatMoney(targetAmt, currency)})`,
+        summary: `Gasto ${expenseType} creado: ${desc} por ${formatMoney(amountFound, currency)}`,
+        data: { amount: amountFound, description: desc, category, type: expenseType },
       },
     };
   }

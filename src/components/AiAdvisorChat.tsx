@@ -24,8 +24,10 @@ interface AiAdvisorChatProps {
 const QUICK_QUESTIONS = [
   'Anotá un gasto de $ 15.000 en el súper',
   'Cobré 450.000 de sueldo',
-  '¿Cuánto llevo gastado este mes?',
-  '¿Puedo comprarme algo de $ 50.000?',
+  '¿Cuánto debería ganar por día para llegar a la meta?',
+  '¿Cuánto vengo vendiendo en la semana por categoría?',
+  'Calculá mi confort financiero (50/30/20)',
+  '¿Cuánto ingresó y cuánto se gastó este mes?',
 ];
 
 export const AiAdvisorChat: React.FC<AiAdvisorChatProps> = ({ isOpen, onClose }) => {
@@ -48,28 +50,31 @@ export const AiAdvisorChat: React.FC<AiAdvisorChatProps> = ({ isOpen, onClose })
     deleteIncome,
     addInvestment,
     deleteInvestment,
+    updateConfig,
   } = useFinance();
 
   const getWelcomeText = (user: typeof googleUser) => {
     if (!user || !user.name) {
       return `¡Hola! Soy GASTON, tu agente y asesor financiero inteligente.
 
-Puedo registrar gastos o ingresos, consultar tus saldos por categoría, modificar cualquier movimiento si hubo un error o evaluar compras para cuidar tu bolsillo.
+Puedo registrar gastos fijos y variables, cobros e ingresos, metas de ahorro y fondos de emergencia. Además, calculo tu nivel de confort financiero (50/30/20), automatizo cuánto deberías ganar por día para llegar a tu meta y analizo tus ventas semanales por categoría.
 
 Tus datos están protegidos en este dispositivo. Si querés sincronizar con tu Google Drive y Sheets, podés iniciar sesión con Google cuando gustes.
 
 [ACTION:LOGIN_GOOGLE]`;
     }
     const firstName = user.name.split(' ')[0];
-    return `¡Hola, ${firstName}! Soy GASTON, tu agente y asesor financiero personal.
+    return `¡Hola, ${firstName}! Soy GASTON, tu agente y asesor financiero autónomo.
 
 Todo lo que me pidas se procesará y ejecutará automáticamente en tu aplicación y en tu Google Sheets:
-• "Anotá un gasto de 12.000 en verdulería"
-• "Cobré 450.000 de sueldo"
-• "Cambiá el último gasto a 15.000" o "Borrá el último gasto"
-• "¿Cuánto llevo gastado en comida?" o "¿Puedo comprarme algo de 50k?"
+• "Anotá un gasto de 15.000 en el súper" o "Pagué 180k de alquiler"
+• "Cobré 450.000 de sueldo" o "Ahorré 50k para el fondo de emergencia"
+• "¿Cuánto debería ganar por día para llegar a la meta?"
+• "¿Cuánto vengo vendiendo en la semana según la categoría?"
+• "Calculá mi confort financiero (50/30/20)"
+• "¿Cuánto ingresó y cuánto se gastó este mes?"
 
-¿Qué movimiento querés registrar o consultar?`;
+¿Qué movimiento querés registrar o consultar hoy?`;
   };
 
   const [messages, setMessages] = useState<ChatMessage[]>(() => [
@@ -211,6 +216,7 @@ Todo lo que me pidas se procesará y ejecutará automáticamente en tu aplicaci�
         deleteSavingsGoal,
         addInvestment,
         deleteInvestment,
+        updateConfig,
       };
 
       // 1. Procesar con el motor semántico de CRUD y aprendizaje continuo
@@ -224,7 +230,9 @@ Todo lo que me pidas se procesará y ejecutará automáticamente en tu aplicaci�
         if (
           execResult.actionExecuted.type === 'CREATE_EXPENSE' ||
           execResult.actionExecuted.type === 'CREATE_INCOME' ||
-          execResult.actionExecuted.type === 'CREATE_GOAL'
+          execResult.actionExecuted.type === 'CREATE_GOAL' ||
+          execResult.actionExecuted.type === 'ALLOCATE_SAVINGS' ||
+          execResult.actionExecuted.type === 'UPDATE_EMERGENCY_FUND'
         ) {
           confetti({ particleCount: 40, spread: 45, origin: { y: 0.7 } });
         }

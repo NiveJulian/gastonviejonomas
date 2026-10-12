@@ -1,4 +1,4 @@
-import type { Expense, SavingsGoal, AppConfig, ComfortAnalysis, ComfortLevel } from '../types/finance';
+import type { Expense, SavingsGoal, AppConfig, ComfortAnalysis, ComfortLevel, Income } from '../types/finance';
 import { calculateFinancialTotals } from './rulesEngine';
 
 /**
@@ -7,16 +7,19 @@ import { calculateFinancialTotals } from './rulesEngine';
 export function calculateComfortAnalysis(
   expenses: Expense[],
   savings: SavingsGoal[],
-  config: AppConfig
+  config: AppConfig,
+  incomes: Income[] = []
 ): ComfortAnalysis {
-  const totals = calculateFinancialTotals(expenses, savings, config);
+  const totals = calculateFinancialTotals(expenses, savings, config, incomes);
 
   // Gastos esenciales: Gastos fijos + categorías básicas de alimentos y salud
   const essentialFixed = totals.currentMonthFixedExpenses > 0
     ? totals.currentMonthFixedExpenses
     : (config.monthlyIncome > 0 ? config.monthlyIncome * 0.5 : 0);
 
-  const currentIncome = config.monthlyIncome > 0 ? config.monthlyIncome : 0;
+  const currentIncome = totals.effectiveMonthlyIncome > 0
+    ? totals.effectiveMonthlyIncome
+    : (config.monthlyIncome > 0 ? config.monthlyIncome : 0);
 
   // CÁLCULO DE NIVELES DE INGRESO
   // 1. Supervivencia: Lo esencial representa el 85% de los ingresos (15% margen)

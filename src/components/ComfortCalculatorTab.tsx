@@ -1,14 +1,8 @@
 import React, { useState } from 'react';
 import {
   Compass,
-  CheckCircle2,
-  TrendingUp,
   Shield,
-  HeartHandshake,
-  Sparkles,
-  ArrowRight,
   Info,
-  DollarSign,
   Sliders,
   ChevronRight,
 } from 'lucide-react';
@@ -18,9 +12,9 @@ import { calculateFinancialTotals } from '../utils/rulesEngine';
 import { formatMoney } from '../utils/helpers';
 
 export const ComfortCalculatorTab: React.FC = () => {
-  const { expenses, savings, config } = useFinance();
-  const comfort = calculateComfortAnalysis(expenses, savings, config);
-  const totals = calculateFinancialTotals(expenses, savings, config);
+  const { expenses, savings, config, incomes } = useFinance();
+  const comfort = calculateComfortAnalysis(expenses, savings, config, incomes);
+  const totals = calculateFinancialTotals(expenses, savings, config, incomes);
 
   // Simulador interactivo
   const [simulatedIncome, setSimulatedIncome] = useState<number>(config.monthlyIncome || 0);
@@ -30,7 +24,6 @@ export const ComfortCalculatorTab: React.FC = () => {
 
   // Recalcular con datos simulados
   const simulatedIdealIncome = simulatedFixedExpenses > 0 ? Math.round(simulatedFixedExpenses / 0.5) : 0;
-  const simulatedGap = Math.max(0, simulatedIdealIncome - simulatedIncome);
   const simulatedComfortPercent = simulatedIdealIncome > 0
     ? Math.min(100, Math.round((simulatedIncome / simulatedIdealIncome) * 100))
     : (simulatedIncome > 0 ? 100 : 0);

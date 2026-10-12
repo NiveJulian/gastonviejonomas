@@ -709,6 +709,7 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
           deleteSavingsGoal,
           addInvestment,
           deleteInvestment,
+          updateConfig,
         };
         const execResult = await processAgentInstruction(query, execCtx);
         if (execResult.actionExecuted) {
