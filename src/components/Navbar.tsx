@@ -27,6 +27,7 @@ import {
   Trash2,
   Download,
   Calendar,
+  CreditCard,
 } from 'lucide-react';
 import { useFinance } from '../context/FinanceContext';
 import { formatMoney } from '../utils/helpers';
@@ -36,6 +37,7 @@ import { getUpcomingScheduledExpenses } from '../services/notificationService';
 export type NavTab =
   | 'dashboard'
   | 'scheduled'
+  | 'debts'
   | 'evaluator'
   | 'incomes'
   | 'expenses'
@@ -84,10 +86,12 @@ export const Navbar: React.FC<NavbarProps> = ({
     syncDirectWithGoogle,
     telegramBotStatus,
     scheduledExpenses,
+    debts,
   } = useFinance();
 
   const totals = calculateFinancialTotals(expenses, savings, config, incomes);
   const upcomingDebitsCount = getUpcomingScheduledExpenses(scheduledExpenses || [], 3).length;
+  const activeDebtsCount = (debts || []).filter((d) => d.status === 'activa').length;
 
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
@@ -132,6 +136,14 @@ export const Navbar: React.FC<NavbarProps> = ({
       icon: Calendar,
       badge: upcomingDebitsCount > 0 ? upcomingDebitsCount : undefined,
       color: 'text-indigo-600',
+    },
+    {
+      id: 'debts',
+      label: 'Deudas / Cuotas',
+      description: 'Plan de pago y cuotas arrastradas',
+      icon: CreditCard,
+      badge: activeDebtsCount > 0 ? activeDebtsCount : undefined,
+      color: 'text-rose-600',
     },
     {
       id: 'incomes',

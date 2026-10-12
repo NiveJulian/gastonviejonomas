@@ -22,6 +22,8 @@ interface AiAdvisorChatProps {
 }
 
 const QUICK_QUESTIONS = [
+  '¿Cuánto debo destinar en cuotas para terminar de pagar mis deudas?',
+  'Tengo una deuda de tarjeta de 12 cuotas de 45.000 y ya pagué 4',
   '¿Qué se me debita esta semana?',
   'Programá el débito de Netflix 8.000 el 15',
   'Anotá un gasto de $ 15.000 en el súper',
@@ -40,6 +42,7 @@ export const AiAdvisorChat: React.FC<AiAdvisorChatProps> = ({ isOpen, onClose })
     investments,
     scheduledExpenses,
     scheduledIncomes,
+    debts,
     config,
     googleUser,
     loginWithGoogle,
@@ -59,13 +62,18 @@ export const AiAdvisorChat: React.FC<AiAdvisorChatProps> = ({ isOpen, onClose })
     addScheduledIncome,
     executeScheduledExpense,
     executeScheduledIncome,
+    addDebt,
+    updateDebt,
+    deleteDebt,
+    payDebtInstallment,
+    collectDebtInstallment,
   } = useFinance();
 
   const getWelcomeText = (user: typeof googleUser) => {
     if (!user || !user.name) {
       return `¡Hola! Soy GASTON, tu agente y asesor financiero inteligente.
 
-Puedo registrar gastos fijos y variables, cobros e ingresos, débitos programados y vencimientos, metas de ahorro y fondos de emergencia. Además, calculo tu nivel de confort financiero (50/30/20), automatizo cuánto deberías ganar por día para llegar a tu meta y analizo tus ventas semanales por categoría.
+Puedo registrar gastos fijos y variables, cobros e ingresos, débitos programados, deudas en cuotas (arrastradas o nuevas), metas de ahorro y fondos de emergencia. Además, calculo tu nivel de confort financiero (50/30/20), automatizo cuánto deberías ganar por día para llegar a tu meta y analizo tus compromisos de cuotas.
 
 Tus datos están protegidos en este dispositivo. Si querés sincronizar con tu Google Drive y Sheets, podés iniciar sesión con Google cuando gustes.
 
@@ -75,13 +83,12 @@ Tus datos están protegidos en este dispositivo. Si querés sincronizar con tu G
     return `¡Hola, ${firstName}! Soy GASTON, tu agente y asesor financiero autónomo.
 
 Todo lo que me pidas se procesará y ejecutará automáticamente en tu aplicación y en tu Google Sheets:
+• "¿Cuánto debo destinar en cuotas para terminar de pagar mis deudas?"
+• "Tengo una deuda de tarjeta en 12 cuotas de 45.000 y ya pagué 4" o "Pagué la cuota de la tarjeta"
 • "¿Qué se me debita esta semana?" o "Programá el débito de Netflix 8.000 el 15"
-• "Anotá un gasto de 15.000 en el súper" o "Pagué 180k de alquiler"
-• "Cobré 450.000 de sueldo" o "Ahorré 50k para el fondo de emergencia"
+• "Anotá un gasto de 15.000 en el súper" o "Cobré 450.000 de sueldo"
 • "¿Cuánto debería ganar por día para llegar a la meta?"
-• "¿Cuánto vengo vendiendo en la semana según la categoría?"
 • "Calculá mi confort financiero (50/30/20)"
-• "¿Cuánto ingresó y cuánto se gastó este mes?"
 
 ¿Qué movimiento querés registrar o consultar hoy?`;
   };
@@ -214,6 +221,7 @@ Todo lo que me pidas se procesará y ejecutará automáticamente en tu aplicaci�
         investments,
         scheduledExpenses,
         scheduledIncomes,
+        debts,
         config,
         googleUser,
         addExpense,
@@ -232,6 +240,11 @@ Todo lo que me pidas se procesará y ejecutará automáticamente en tu aplicaci�
         addScheduledIncome,
         executeScheduledExpense,
         executeScheduledIncome,
+        addDebt,
+        updateDebt,
+        deleteDebt,
+        payDebtInstallment,
+        collectDebtInstallment,
       };
 
       // 1. Procesar con el motor semántico de CRUD y aprendizaje continuo
@@ -250,7 +263,10 @@ Todo lo que me pidas se procesará y ejecutará automáticamente en tu aplicaci�
           execResult.actionExecuted.type === 'UPDATE_EMERGENCY_FUND' ||
           execResult.actionExecuted.type === 'SCHEDULE_EXPENSE' ||
           execResult.actionExecuted.type === 'SCHEDULE_INCOME' ||
-          execResult.actionExecuted.type === 'EXECUTE_SCHEDULED'
+          execResult.actionExecuted.type === 'EXECUTE_SCHEDULED' ||
+          execResult.actionExecuted.type === 'CREATE_DEBT' ||
+          execResult.actionExecuted.type === 'PAY_INSTALLMENT' ||
+          execResult.actionExecuted.type === 'COLLECT_INSTALLMENT'
         ) {
           confetti({ particleCount: 40, spread: 45, origin: { y: 0.7 } });
         }

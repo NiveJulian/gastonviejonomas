@@ -9,6 +9,7 @@ import type {
   Income,
   ScheduledExpense,
   ScheduledIncome,
+  Debt,
 } from '../types/finance';
 import {
   fetchFromGoogleSheet,
@@ -35,6 +36,7 @@ import {
   appendSavingsDirect,
   appendScheduledExpenseDirect,
   appendScheduledIncomeDirect,
+  appendDebtDirect,
   deleteRowDirect,
   ensureIncomeSheetExists,
   uploadReceiptToDriveDirect,
@@ -56,6 +58,7 @@ interface FinanceContextType {
   savings: SavingsGoal[];
   scheduledExpenses: ScheduledExpense[];
   scheduledIncomes: ScheduledIncome[];
+  debts: Debt[];
   config: AppConfig;
   googleUser: GoogleUser | null;
   isSyncing: boolean;
@@ -73,6 +76,11 @@ interface FinanceContextType {
   deleteScheduledIncome: (id: string) => Promise<void>;
   executeScheduledIncome: (id: string) => Promise<void>;
   checkScheduledNotifications: (force?: boolean) => Promise<{ browserSent: number; telegramSent: number }>;
+  addDebt: (debt: Omit<Debt, 'id'>) => Promise<void>;
+  updateDebt: (id: string, updated: Partial<Debt>) => Promise<void>;
+  deleteDebt: (id: string) => Promise<void>;
+  payDebtInstallment: (id: string) => Promise<void>;
+  collectDebtInstallment: (id: string) => Promise<void>;
   addExpense: (
     expense: Omit<Expense, 'id'>,
     receiptBase64?: string,
@@ -160,6 +168,11 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
     return saved ? JSON.parse(saved) : [];
   });
 
+  const [debts, setDebts] = useState<Debt[]>(() => {
+    const saved = localStorage.getItem(STORAGE_KEY + '_debts');
+    return saved ? JSON.parse(saved) : [];
+  });
+
   const [config, setConfig] = useState<AppConfig>(() => {
     const saved = localStorage.getItem(STORAGE_KEY + '_config');
     if (saved) {
@@ -232,6 +245,10 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY + '_scheduled_incomes', JSON.stringify(scheduledIncomes));
   }, [scheduledIncomes]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY + '_debts', JSON.stringify(debts));
+  }, [debts]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY + '_config', JSON.stringify(config));
@@ -314,6 +331,7 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
       if (data.savings && data.savings.length > 0) setSavings(data.savings);
       if (data.scheduledExpenses && data.scheduledExpenses.length > 0) setScheduledExpenses(data.scheduledExpenses);
       if (data.scheduledIncomes && data.scheduledIncomes.length > 0) setScheduledIncomes(data.scheduledIncomes);
+      if (data.debts && data.debts.length > 0) setDebts(data.debts);
 
       // Sincronizar Ingresos de Google Sheets y fusionar con datos locales existentes si aplica
       if (data.incomes && data.incomes.length > 0) {
@@ -462,6 +480,9 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
         }
         for (const sav of savings) {
           await appendSavingsDirect(user.accessToken, spreadsheetId, sav);
+        }
+        for (const d of debts) {
+          await appendDebtDirect(user.accessToken, spreadsheetId, d);
         }
       }
 
@@ -985,6 +1006,111 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
     });
   };
 
+  // --- DEUDAS Y FINANCIACIÓN EN CUOTAS ---
+  const addDebt = async (debtData: Omit<Debt, 'id'>) => {
+    const id = generateId();
+    const newDebt: Debt = { ...debtData, id };
+    setDebts((prev) => [newDebt, ...prev]);
+
+    if (googleUser && config.googleSpreadsheetId) {
+      try {
+        await appendDebtDirect(googleUser.accessToken, config.googleSpreadsheetId, newDebt);
+      } catch (err: any) {
+        console.warn('Error guardando deuda en Sheets:', err);
+      }
+    }
+  };
+
+  const updateDebt = async (id: string, updated: Partial<Debt>) => {
+    let updatedItem: Debt | undefined;
+    setDebts((prev) =>
+      prev.map((d) => {
+        if (d.id === id) {
+          updatedItem = { ...d, ...updated };
+          return updatedItem;
+        }
+        return d;
+      })
+    );
+
+    if (googleUser && config.googleSpreadsheetId && updatedItem) {
+      try {
+        await deleteRowDirect(googleUser.accessToken, config.googleSpreadsheetId, 'Deudas', id);
+        await appendDebtDirect(googleUser.accessToken, config.googleSpreadsheetId, updatedItem);
+      } catch (err) {
+        console.warn('Error actualizando deuda en Sheets:', err);
+      }
+    }
+  };
+
+  const deleteDebt = async (id: string) => {
+    setDebts((prev) => prev.filter((d) => d.id !== id));
+    if (googleUser && config.googleSpreadsheetId) {
+      try {
+        await deleteRowDirect(googleUser.accessToken, config.googleSpreadsheetId, 'Deudas', id);
+      } catch {}
+    }
+  };
+
+  const payDebtInstallment = async (id: string) => {
+    const debt = debts.find((d) => d.id === id);
+    if (!debt) return;
+
+    const todayStr = new Date().toISOString().split('T')[0];
+    const nextInstallmentNum = debt.paidInstallments + 1;
+
+    // 1. Asentar como gasto real de cuota
+    await addExpense({
+      date: todayStr,
+      description: `Cuota ${nextInstallmentNum}/${debt.totalInstallments} - ${debt.name}`,
+      amount: debt.installmentAmount,
+      category: 'Servicios (Luz, Agua, Gas, Internet)',
+      type: 'fijo',
+      paymentMethod: 'Tarjeta / Transferencia',
+      notes: `Pago de cuota ${nextInstallmentNum} de ${debt.totalInstallments} de deuda "${debt.name}"`,
+    });
+
+    // 2. Avanzar cuota pagada y chequear si se saldó
+    const newPaid = Math.min(debt.totalInstallments, nextInstallmentNum);
+    const isCompleted = newPaid >= debt.totalInstallments;
+
+    await updateDebt(id, {
+      paidInstallments: newPaid,
+      status: isCompleted ? 'saldada' : 'activa',
+      lastPaymentDate: todayStr,
+    });
+  };
+
+  const collectDebtInstallment = async (id: string) => {
+    const debt = debts.find((d) => d.id === id);
+    if (!debt || debt.type !== 'a_cobrar') return;
+
+    const todayStr = new Date().toISOString().split('T')[0];
+    const nextInstallmentNum = debt.paidInstallments + 1;
+
+    // 1. Asentar como cobro/ingreso real
+    if (addIncome) {
+      await addIncome({
+        date: todayStr,
+        description: `Cobro cuota ${nextInstallmentNum}/${debt.totalInstallments} - ${debt.name}`,
+        amount: debt.installmentAmount,
+        category: 'Otros Ingresos',
+        paymentMethod: 'Transferencia bancaria',
+        notes: `Cobro de cuota a favor "${debt.name}"`,
+      });
+    }
+
+    // 2. Avanzar cuota cobrada
+    const newPaid = Math.min(debt.totalInstallments, nextInstallmentNum);
+    const isCompleted = newPaid >= debt.totalInstallments;
+
+    await updateDebt(id, {
+      paidInstallments: newPaid,
+      status: isCompleted ? 'saldada' : 'activa',
+      lastPaymentDate: todayStr,
+    });
+  };
+
   // Exportar respaldo JSON
   const exportDataJson = () => {
     const payload = {
@@ -1117,6 +1243,7 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
     setSavings([]);
     setScheduledExpenses([]);
     setScheduledIncomes([]);
+    setDebts([]);
     setConfig(initialState.config);
 
     // 2. Limpieza de llaves en localStorage
@@ -1127,6 +1254,7 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
       localStorage.removeItem(STORAGE_KEY + '_savings');
       localStorage.removeItem(STORAGE_KEY + '_scheduled_expenses');
       localStorage.removeItem(STORAGE_KEY + '_scheduled_incomes');
+      localStorage.removeItem(STORAGE_KEY + '_debts');
       localStorage.removeItem(STORAGE_KEY + '_config');
       localStorage.removeItem('misfinanzas_data_v1_expenses');
       localStorage.removeItem('misfinanzas_data_v1_incomes');
@@ -1147,6 +1275,7 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
         savings,
         scheduledExpenses,
         scheduledIncomes,
+        debts,
         config,
         googleUser,
         isSyncing,
@@ -1164,6 +1293,11 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
         deleteScheduledIncome,
         executeScheduledIncome,
         checkScheduledNotifications,
+        addDebt,
+        updateDebt,
+        deleteDebt,
+        payDebtInstallment,
+        collectDebtInstallment,
         addExpense,
         updateExpense,
         deleteExpense,

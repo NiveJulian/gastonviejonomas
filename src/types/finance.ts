@@ -84,6 +84,37 @@ export interface ScheduledIncome {
   notes?: string;
 }
 
+// ---------------- DEUDAS Y CUOTAS ----------------
+export type DebtType = 'a_pagar' | 'a_cobrar';
+export type DebtStatus = 'activa' | 'saldada' | 'renegociada';
+export type DebtCategory =
+  | 'Tarjeta de Crédito'
+  | 'Préstamo Bancario'
+  | 'Préstamo Personal / Familiar'
+  | 'Prendario / Auto'
+  | 'Hipotecario'
+  | 'Electrodomésticos / Tecnología'
+  | 'Servicios / Impuestos'
+  | 'Comercial'
+  | 'Otro';
+
+export interface Debt {
+  id: string;
+  name: string; // Ej: "Tarjeta Visa - Smart TV", "Préstamo Banco", "Préstamo a Juan"
+  type: DebtType; // 'a_pagar' (pasivo) | 'a_cobrar' (activo)
+  category: DebtCategory | string;
+  totalAmount: number; // Monto total financiado
+  installmentAmount: number; // Monto de cada cuota
+  totalInstallments: number; // Total de cuotas pactadas (ej: 12)
+  paidInstallments: number; // Cuotas que ya viene pagando / pagadas (ej: 5)
+  dueDayOfMonth?: number; // Día del mes de vencimiento de la cuota (1-31)
+  interestRateAnnual?: number; // Tasa anual opcional
+  startDate?: string; // Fecha de inicio o primera cuota (YYYY-MM-DD)
+  status: DebtStatus;
+  notes?: string;
+  lastPaymentDate?: string;
+}
+
 export type InvestmentType =
   | 'Plazo Fijo'
   | 'Fondos Comunes / FCI'
@@ -136,6 +167,8 @@ export interface AppConfig {
   monthlyIncome: number;
   currency: string;
   emergencyFundMinimum: number;
+  debtRepaymentBudget?: number; // Presupuesto mensual asignado para liquidar deudas
+  debtRepaymentPercent?: number; // Porcentaje del ingreso mensual pensado para deudas (ej. 20%)
   appsScriptUrl: string; // URL Web App de Google Apps Script (opcional si usa OAuth)
   geminiApiKey?: string; // API Key opcional
   omnirouteBaseUrl?: string; // Endpoint base de Omniroute

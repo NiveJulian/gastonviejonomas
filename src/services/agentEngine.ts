@@ -5,6 +5,7 @@ import type {
   Investment,
   ScheduledExpense,
   ScheduledIncome,
+  Debt,
   RecurrenceType,
   AppConfig,
   GoogleUser,
@@ -14,6 +15,7 @@ import type {
 } from '../types/finance';
 import { calculateFinancialTotals } from '../utils/rulesEngine';
 import { calculateComfortAnalysis } from '../utils/comfortCalculator';
+import { calculateDebtTotals, getDebtDetails } from '../utils/debtCalculator';
 import { formatMoney } from '../utils/helpers';
 import {
   inferExpenseCategory,
@@ -34,6 +36,7 @@ export interface AgentExecutionContext {
   investments: Investment[];
   scheduledExpenses?: ScheduledExpense[];
   scheduledIncomes?: ScheduledIncome[];
+  debts?: Debt[];
   config: AppConfig;
   googleUser?: GoogleUser | null;
   addExpense: (expense: Omit<Expense, 'id'>) => Promise<void>;
@@ -52,6 +55,11 @@ export interface AgentExecutionContext {
   addScheduledIncome?: (item: Omit<ScheduledIncome, 'id'>) => Promise<void>;
   executeScheduledExpense?: (id: string) => Promise<void>;
   executeScheduledIncome?: (id: string) => Promise<void>;
+  addDebt?: (debt: Omit<Debt, 'id'>) => Promise<void>;
+  updateDebt?: (id: string, updated: Partial<Debt>) => Promise<void>;
+  deleteDebt?: (id: string) => Promise<void>;
+  payDebtInstallment?: (id: string) => Promise<void>;
+  collectDebtInstallment?: (id: string) => Promise<void>;
 }
 
 export interface AgentExecutionResult {
@@ -76,6 +84,12 @@ export interface AgentExecutionResult {
       | 'SCHEDULE_EXPENSE'
       | 'SCHEDULE_INCOME'
       | 'EXECUTE_SCHEDULED'
+      | 'CREATE_DEBT'
+      | 'UPDATE_DEBT'
+      | 'PAY_INSTALLMENT'
+      | 'COLLECT_INSTALLMENT'
+      | 'CALCULATE_DEBT_PLAN'
+      | 'ASK_DEBT_DETAILS'
       | 'LEARN_RULE'
       | 'QUERY';
     summary: string;
@@ -326,6 +340,83 @@ function cleanScheduledDescription(text: string, amount: number): string {
     return clean.charAt(0).toUpperCase() + clean.slice(1);
   }
   return 'Gasto Programado';
+}
+
+/**
+ * Extrae número de cuotas totales y pagadas de un texto
+ */
+export function extractInstallments(text: string): {
+  totalInstallments?: number;
+  paidInstallments?: number;
+} {
+  const t = text.toLowerCase();
+  let totalInstallments: number | undefined;
+  let paidInstallments: number | undefined;
+
+  // Cuotas fraccionarias: "ya pagué 5 de 12", "5 de 12 cuotas", "5/12 cuotas"
+  const fractionMatch = t.match(/\b(\d{1,2})\s*(?:de|\/)\s*(\d{1,2})\s*(?:cuotas)?\b/);
+  if (fractionMatch) {
+    paidInstallments = parseInt(fractionMatch[1], 10);
+    totalInstallments = parseInt(fractionMatch[2], 10);
+    return { totalInstallments, paidInstallments };
+  }
+
+  // Cuotas pagadas / que viene arrastrando: "ya pagué 5", "vengo pagando 4 cuotas", "pagadas 6"
+  const paidMatch = t.match(/\b(?:ya\s+pagu[eé]|vengo\s+pagando|llevo\s+pagando|pagu[eé]|pagadas?)\s*(\d{1,2})\s*(?:cuotas?)?\b/);
+  if (paidMatch) {
+    paidInstallments = parseInt(paidMatch[1], 10);
+  }
+
+  // Cuotas totales: "en 12 cuotas", "18 cuotas", "en 6 veces", "6 pagos"
+  const totalMatch = t.match(/\b(?:en\s+)?(\d{1,2})\s*(?:cuotas|veces|pagos)\b/);
+  if (totalMatch) {
+    totalInstallments = parseInt(totalMatch[1], 10);
+  }
+
+  return { totalInstallments, paidInstallments };
+}
+
+/**
+ * Extrae porcentaje de destino de ingresos (ej: 20%)
+ */
+export function extractIncomePercent(text: string): number | undefined {
+  const match = text.match(/\b(\d{1,2})\s*%\b/);
+  if (match) {
+    const val = parseInt(match[1], 10);
+    if (val > 0 && val <= 100) return val;
+  }
+  return undefined;
+}
+
+/**
+ * Limpia y extrae el nombre o concepto de una deuda
+ */
+export function cleanDebtName(text: string, amount: number): string {
+  let clean = text
+    .replace(/(?:por favor|che|gaston|gastón|anot[aá]|registr[aá]|carg[aá]|agreg[aá]|tengo una deuda de|tengo una deuda|deuda de|deuda con|préstamo de|prestamo de|préstamo con|prestamo con|debo)/gi, '')
+    .replace(/(?:en cuotas de|cuotas de|cada cuota|por mes|mensual|la cuota de|cuota de)/gi, '')
+    .replace(/(?:ya pagué|vengo pagando|llevo pagando|pagué|pagadas?)\s*\d{1,2}\s*(?:cuotas?)?/gi, '')
+    .replace(/\b\d{1,2}\s*(?:de|\/)\s*\d{1,2}\s*(?:cuotas)?\b/gi, '')
+    .replace(/\b(?:en\s+)?\d{1,2}\s*(?:cuotas|veces|pagos)\b/gi, '')
+    .replace(/\b\d{1,2}\s*%\b/gi, '')
+    .replace(/(?:quiero destinar|tengo pensado destinar|voy a destinar|destino|del ingreso|de lo que gano)/gi, '')
+    .replace(/\b(?:pesos|mangos|ars|lucas|palos|k|mil)\b/gi, '')
+    .trim();
+
+  if (amount > 0) {
+    const amountStr = amount.toString();
+    clean = clean.replace(new RegExp(`\\$?\\s*${amountStr}`, 'g'), '');
+    const formattedWithDot = amount.toLocaleString('es-AR');
+    clean = clean.replace(new RegExp(`\\$?\\s*${formattedWithDot.replace(/\./g, '\\.')}`, 'g'), '');
+  }
+
+  clean = clean.replace(/\b\d+(?:[.,]\d+)?\b/g, '');
+  clean = clean.replace(/\s+/g, ' ').replace(/^[:\-\s,]+|[:\-\s,]+$/g, '').trim();
+
+  if (clean.length > 0) {
+    return clean.charAt(0).toUpperCase() + clean.slice(1);
+  }
+  return 'Financiación en Cuotas';
 }
 
 
@@ -1227,6 +1318,292 @@ ${detailLines}
   }
 
   // ---------------------------------------------------------------------------
+  // 8G. DEUDAS: PAGO O COBRO DE CUOTAS ("Pagué la cuota 5 de la tarjeta", "Cobré cuota")
+  // ---------------------------------------------------------------------------
+  const isPayInstallmentIntent =
+    (lower.includes('pagu') ||
+      lower.includes('pagar') ||
+      lower.includes('asent') ||
+      lower.includes('abon') ||
+      lower.includes('liquid')) &&
+    (lower.includes('cuota') || lower.includes('deuda'));
+
+  if (isPayInstallmentIntent && ctx.debts && ctx.debts.length > 0) {
+    const activeDebts = ctx.debts.filter((d) => d.type === 'a_pagar' && d.status === 'activa');
+    const matchedDebt =
+      activeDebts.find(
+        (d) =>
+          lower.includes(d.name.toLowerCase()) ||
+          d.name
+            .toLowerCase()
+            .split(' ')
+            .some((w) => w.length >= 4 && lower.includes(w))
+      ) || (activeDebts.length === 1 ? activeDebts[0] : undefined);
+
+    if (matchedDebt && ctx.payDebtInstallment) {
+      await ctx.payDebtInstallment(matchedDebt.id);
+      const nextPaid = matchedDebt.paidInstallments + 1;
+      const remaining = Math.max(0, matchedDebt.totalInstallments - nextPaid);
+      const remainingAmt = remaining * matchedDebt.installmentAmount;
+      const pct = Math.min(100, Math.round((nextPaid / matchedDebt.totalInstallments) * 100));
+
+      const finishMsg =
+        remaining === 0
+          ? `🎉 ¡FELICITACIONES! Liquidaste la deuda "${matchedDebt.name}" en su totalidad. ¡Una carga financiera menos!`
+          : `Te restan ${remaining} cuota${remaining === 1 ? '' : 's'} (${formatMoney(remainingAmt, currency)} pendientes).`;
+
+      return {
+        reply: `¡Pago de cuota registrado impecablemente, ${userName}! Asenté el pago de la cuota ${nextPaid} de ${matchedDebt.totalInstallments} de "${matchedDebt.name}" por ${formatMoney(
+          matchedDebt.installmentAmount,
+          currency
+        )} como gasto. Progreso: ${pct}% saldado. ${finishMsg}`,
+        actionExecuted: {
+          type: 'PAY_INSTALLMENT',
+          summary: `Cuota ${nextPaid}/${matchedDebt.totalInstallments} pagada: ${matchedDebt.name} (${formatMoney(matchedDebt.installmentAmount, currency)})`,
+          entityId: matchedDebt.id,
+          data: { debt: matchedDebt, nextPaid, remaining },
+        },
+      };
+    }
+  }
+
+  const isCollectInstallmentIntent =
+    (lower.includes('cobr') || lower.includes('ingres') || lower.includes('me pagaron')) &&
+    (lower.includes('cuota') || lower.includes('deuda'));
+
+  if (isCollectInstallmentIntent && ctx.debts && ctx.debts.length > 0) {
+    const activeCollect = ctx.debts.filter((d) => d.type === 'a_cobrar' && d.status === 'activa');
+    const matchedDebt =
+      activeCollect.find(
+        (d) =>
+          lower.includes(d.name.toLowerCase()) ||
+          d.name
+            .toLowerCase()
+            .split(' ')
+            .some((w) => w.length >= 4 && lower.includes(w))
+      ) || (activeCollect.length === 1 ? activeCollect[0] : undefined);
+
+    if (matchedDebt && ctx.collectDebtInstallment) {
+      await ctx.collectDebtInstallment(matchedDebt.id);
+      const nextPaid = matchedDebt.paidInstallments + 1;
+      const remaining = Math.max(0, matchedDebt.totalInstallments - nextPaid);
+      return {
+        reply: `¡Cobro de cuota asentado con éxito, ${userName}! Registré el cobro de la cuota ${nextPaid} de ${matchedDebt.totalInstallments} de "${matchedDebt.name}" por ${formatMoney(
+          matchedDebt.installmentAmount,
+          currency
+        )}. Tu saldo disponible aumentó y restan ${remaining} cuotas por cobrar.`,
+        actionExecuted: {
+          type: 'COLLECT_INSTALLMENT',
+          summary: `Cobro cuota ${nextPaid}/${matchedDebt.totalInstallments}: ${matchedDebt.name} (${formatMoney(matchedDebt.installmentAmount, currency)})`,
+          entityId: matchedDebt.id,
+        },
+      };
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 8H. DEUDAS: PLAN DE LIQUIDACIÓN Y CONSULTAS ("¿Cuánto debo destinar en cuotas?", etc.)
+  // ---------------------------------------------------------------------------
+  const isDebtQueryIntent =
+    (lower.includes('cuanto') ||
+      lower.includes('cuánto') ||
+      lower.includes('que') ||
+      lower.includes('qué') ||
+      lower.includes('como') ||
+      lower.includes('cómo')) &&
+    (lower.includes('destinar') ||
+      lower.includes('deuda') ||
+      lower.includes('deudas') ||
+      lower.includes('cuotas') ||
+      lower.includes('terminar de pagar') ||
+      lower.includes('liquidar'));
+
+  if (isDebtQueryIntent && ctx.debts) {
+    const summary = calculateDebtTotals(
+      ctx.debts,
+      ctx.config.monthlyIncome,
+      ctx.config.debtRepaymentBudget,
+      ctx.config.debtRepaymentPercent
+    );
+
+    if (summary.activeDebtsToPay.length === 0 && summary.activeDebtsToCollect.length === 0) {
+      return {
+        reply: `No tenés deudas ni cuotas activas registradas en este momento, ${userName}. Estás 100% libre de deudas. Si tenés alguna tarjeta o préstamo que venís arrastrando, decime "Tengo una deuda de [concepto]" y armamos tu plan de liquidación.`,
+        actionExecuted: {
+          type: 'CALCULATE_DEBT_PLAN',
+          summary: 'Consulta de deudas: 0 activas (100% libre)',
+        },
+      };
+    }
+
+    const payLines = summary.activeDebtsToPay
+      .map((d) => {
+        const det = getDebtDetails(d);
+        return `• ${d.name}: Cuota ${d.paidInstallments}/${d.totalInstallments} (${formatMoney(d.installmentAmount, currency)}/mes) - Restan ${det.remainingInstallments} cuotas (${formatMoney(det.remainingAmount, currency)})`;
+      })
+      .join('\n');
+
+    const collectLines =
+      summary.activeDebtsToCollect.length > 0
+        ? `\n\n🟢 Deudas a cobrar a tu favor:\n` +
+          summary.activeDebtsToCollect
+            .map((d) => {
+              const det = getDebtDetails(d);
+              return `• ${d.name}: Te deben ${det.remainingInstallments} cuotas de ${formatMoney(d.installmentAmount, currency)} (Total: ${formatMoney(det.remainingAmount, currency)})`;
+            })
+            .join('\n')
+        : '';
+
+    const budgetNote = ctx.config.debtRepaymentPercent
+      ? `\n🎯 Presupuesto configurado: ${ctx.config.debtRepaymentPercent}% de tus ingresos (${formatMoney(summary.targetBudget, currency)}/mes).`
+      : ctx.config.debtRepaymentBudget
+      ? `\n🎯 Presupuesto configurado: ${formatMoney(ctx.config.debtRepaymentBudget, currency)}/mes.`
+      : '';
+
+    const reply = `Plan de Compromiso y Liquidación de Deudas, ${userName}:
+
+💳 Compromiso mensual de cuotas: ${formatMoney(summary.monthlyInstallmentsToPay, currency)}/mes (${summary.incomeCommitmentPercent}% de tus ingresos)
+👉 Destino diario sugerido: ${formatMoney(summary.dailyCommitmentToPay, currency)}/día para cubrir las cuotas sin sobresaltos
+⏳ Saldo total pendiente a pagar: ${formatMoney(summary.totalDebtToPayRemaining, currency)} (estimado libre en ${summary.maxMonthsToPayoff} meses)
+📊 Progreso general: ${summary.overallPayProgressPercent}% saldado
+${budgetNote}
+
+Desglose de cuotas activas a pagar:
+${payLines}${collectLines}`;
+
+    return {
+      reply,
+      actionExecuted: {
+        type: 'CALCULATE_DEBT_PLAN',
+        summary: `Deudas: ${formatMoney(summary.monthlyInstallmentsToPay, currency)}/mes (${summary.incomeCommitmentPercent}% ingresos)`,
+        data: summary,
+      },
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // 8I. DEUDAS: REGISTRO O ASISTENCIA CONVERSACIONAL ("Tengo una deuda...", "Registrá deuda...")
+  // ---------------------------------------------------------------------------
+  const isDebtCreationOrAssistanceIntent =
+    (lower.includes('deuda') ||
+      lower.includes('cuotas') ||
+      lower.includes('prestamo') ||
+      lower.includes('préstamo')) &&
+    (lower.includes('tengo') ||
+      lower.includes('arrastr') ||
+      lower.includes('registr') ||
+      lower.includes('anot') ||
+      lower.includes('carg') ||
+      lower.includes('agreg') ||
+      lower.includes('saqu') ||
+      lower.includes('hice') ||
+      lower.includes('compr') ||
+      lower.includes('deb'));
+
+  if (isDebtCreationOrAssistanceIntent) {
+    const installmentsInfo = extractInstallments(prompt);
+    const amountVal = extractAmount(prompt);
+    const percentFound = extractIncomePercent(prompt);
+    const isToCollect =
+      lower.includes('a cobrar') ||
+      lower.includes('me deben') ||
+      lower.includes('le preste') ||
+      lower.includes('le presté');
+
+    // CASO 1: Faltan datos esenciales (no indicó cuotas totales o monto)
+    // El agente guía al usuario con preguntas clave sobre la deuda que viene arrastrando:
+    const hasEnoughData = installmentsInfo.totalInstallments !== undefined && amountVal > 0;
+
+    if (!hasEnoughData) {
+      return {
+        reply: `¡Vamos a ordenar esa deuda y armar un plan para liquidarla cuanto antes, ${userName}!
+
+Como es una deuda que ya venís arrastrando, contame:
+1️⃣ ¿En cuántas cuotas totales la hiciste? (ej: 12 cuotas)
+2️⃣ ¿Cuántas cuotas ya venís pagando hasta ahora? (ej: ya pagué 5)
+3️⃣ ¿De cuánto es cada cuota (o el saldo total que te queda)?
+4️⃣ ¿Qué porcentaje o monto de lo que ganás tenés pensado destinar por mes para sacártela de encima?
+
+Con esos datos calculo exactamente cuánto debés destinar por mes y por día, en cuántos meses quedás libre y cómo impacta en tu saldo.`,
+        actionExecuted: {
+          type: 'ASK_DEBT_DETAILS',
+          summary: 'Consulta guiada de cuotas y destino de ingresos para liquidar deuda',
+        },
+      };
+    }
+
+    // CASO 2: Tiene datos suficientes para registrar la deuda
+    const totalInst = installmentsInfo.totalInstallments || 1;
+    const paidInst = Math.min(totalInst, installmentsInfo.paidInstallments || 0);
+    const isTotalAmountStated = lower.includes('total') || lower.includes('monto total');
+
+    let installmentAmt = amountVal;
+    let totalAmt = amountVal * totalInst;
+
+    if (isTotalAmountStated && amountVal >= 10000 && !lower.includes('cada cuota') && !lower.includes('cuotas de')) {
+      totalAmt = amountVal;
+      installmentAmt = Math.round(totalAmt / totalInst);
+    } else if (lower.includes('cada cuota') || lower.includes('cuotas de') || lower.includes('/mes')) {
+      installmentAmt = amountVal;
+      totalAmt = installmentAmt * totalInst;
+    }
+
+    const debtName = cleanDebtName(prompt, amountVal) || 'Financiación en Cuotas';
+
+    // Si especificó porcentaje de destino de ingresos, actualizar configuración
+    if (percentFound && ctx.updateConfig) {
+      await ctx.updateConfig({ debtRepaymentPercent: percentFound });
+    }
+
+    if (ctx.addDebt) {
+      await ctx.addDebt({
+        name: debtName,
+        type: isToCollect ? 'a_cobrar' : 'a_pagar',
+        category: lower.includes('tarjeta')
+          ? 'Tarjeta de Crédito'
+          : lower.includes('auto') || lower.includes('moto')
+          ? 'Prendario / Auto'
+          : lower.includes('banco')
+          ? 'Préstamo Bancario'
+          : 'Electrodomésticos / Tecnología',
+        totalAmount: totalAmt,
+        installmentAmount: installmentAmt,
+        totalInstallments: totalInst,
+        paidInstallments: paidInst,
+        dueDayOfMonth: 10,
+        status: paidInst >= totalInst ? 'saldada' : 'activa',
+        notes: `Registrada por Agente GASTONAPP. Arrastrada con ${paidInst} cuotas pagadas de ${totalInst}`,
+      });
+
+      const remainingInst = Math.max(0, totalInst - paidInst);
+      const remainingAmt = remainingInst * installmentAmt;
+      const pct = Math.round((paidInst / totalInst) * 100);
+      const percentNote = percentFound
+        ? ` Guardé en tu configuración que destinarás el ${percentFound}% de tus ingresos a liquidarla.`
+        : '';
+
+      const reply = `¡Deuda incorporada al plan financiero, ${userName}!
+
+📌 Concepto: "${debtName}"
+📊 Estado arrastrado: ${paidInst} de ${totalInst} cuotas pagadas (${pct}% saldado)
+💳 Cuota mensual: ${formatMoney(installmentAmt, currency)}/mes
+⏳ Restan: ${remainingInst} cuotas (${formatMoney(remainingAmt, currency)} pendientes)
+🗓️ Tiempo estimado para liquidarla: ${remainingInst} meses${percentNote}
+
+A partir de ahora, tendré en cuenta esta cuota en tu saldo disponible y en las compras que evalúes. Cada vez que pagues una cuota decime "Pagué la cuota de ${debtName}" y actualizaré tu avance.`;
+
+      return {
+        reply,
+        actionExecuted: {
+          type: 'CREATE_DEBT',
+          summary: `Deuda registrada: ${debtName} (${paidInst}/${totalInst} cuotas de ${formatMoney(installmentAmt, currency)})`,
+          data: { debtName, totalInst, paidInst, installmentAmt, remainingAmt },
+        },
+      };
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // 9. CREATE: REGISTRO DE INGRESO
   // ---------------------------------------------------------------------------
   const isIncomeIntent =
@@ -1428,34 +1805,49 @@ ${detailLines}
   // 8. EVALUACIÓN DE COMPRAS ("¿Puedo comprar X por Y?")
   // ---------------------------------------------------------------------------
   if (amountFound > 0 && (lower.includes('puedo') || lower.includes('compr') || lower.includes('alcanza') || lower.includes('conviene'))) {
-    if (amountFound > totals.freeCashFlow) {
-      const deficit = amountFound - totals.freeCashFlow;
+    const monthlyDebtCommitment = (ctx.debts || [])
+      .filter((d) => d.type === 'a_pagar' && d.status === 'activa')
+      .reduce((sum, d) => sum + Number(d.installmentAmount || 0), 0);
+    const availableFreeCash = Math.max(0, totals.freeCashFlow - monthlyDebtCommitment);
+
+    if (amountFound > availableFreeCash) {
+      const deficit = amountFound - availableFreeCash;
+      const debtNote =
+        monthlyDebtCommitment > 0
+          ? ` (teniendo en cuenta que tenés ${formatMoney(monthlyDebtCommitment, currency)} comprometidos en cuotas de deudas este mes)`
+          : '';
+
       return {
         reply: `No te recomiendo esa compra, ${userName}. El valor de ${formatMoney(
           amountFound,
           currency
-        )} supera tu saldo libre disponible (${formatMoney(
-          totals.freeCashFlow,
+        )} supera tu margen libre real de ${formatMoney(
+          availableFreeCash,
           currency
-        )}) por un déficit de -${formatMoney(
+        )}${debtNote} por un déficit de -${formatMoney(
           deficit,
           currency
-        )}. Quedan ${daysRemainingInMonth} días de mes y comprometerías tus fondos de reserva.`,
+        )}. Quedan ${daysRemainingInMonth} días de mes y comprometerías tus compromisos de cuotas o reservas.`,
       };
     } else {
-      const rest = totals.freeCashFlow - amountFound;
+      const rest = availableFreeCash - amountFound;
       const dailyAfter = Math.round(rest / daysRemainingInMonth);
+      const debtNote =
+        monthlyDebtCommitment > 0
+          ? ` (respetando tus ${formatMoney(monthlyDebtCommitment, currency)} de cuotas de deuda de este mes)`
+          : '';
+
       return {
         reply: `Compra viable, ${userName}. El desembolso de ${formatMoney(
           amountFound,
           currency
-        )} entra en tu saldo libre. Te quedarán ${formatMoney(
+        )} entra en tu saldo libre real${debtNote}. Te quedarán ${formatMoney(
           rest,
           currency
         )} disponibles para los ${daysRemainingInMonth} días que restan (${formatMoney(
           dailyAfter,
           currency
-        )}/día) sin tocar tus reservas. Si querés que lo asiente, decime "anotalo" o "registralo".`,
+        )}/día) sin tocar tus reservas ni cuotas. Si querés que lo asiente, decime "anotalo" o "registralo".`,
       };
     }
   }

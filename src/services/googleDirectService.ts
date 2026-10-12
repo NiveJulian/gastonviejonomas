@@ -5,6 +5,7 @@ import type {
   SavingsGoal,
   ScheduledExpense,
   ScheduledIncome,
+  Debt,
   AppConfig,
   DrivePermission,
 } from '../types/finance';
@@ -221,6 +222,97 @@ export async function ensureScheduledSheetsExists(
     }
   } catch (err) {
     console.warn('[GoogleDirectService] Error asegurando pestañas programadas:', err);
+  }
+}
+
+/**
+ * Verifica si existe la pestaña 'Deudas' en la hoja de cálculo.
+ * Si no existe, la agrega automáticamente con sus encabezados formateados.
+ */
+export async function ensureDebtsSheetExists(
+  accessToken: string,
+  spreadsheetId: string
+): Promise<void> {
+  try {
+    const metaUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties(sheetId,title)`;
+    const metaRes = await fetch(metaUrl, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+
+    if (!metaRes.ok) return;
+
+    const meta = await metaRes.json();
+    const sheetsList = meta.sheets || [];
+    const hasDebtsSheet = sheetsList.some(
+      (s: any) => s.properties?.title?.toLowerCase() === 'deudas'
+    );
+
+    if (hasDebtsSheet) return;
+
+    const addRes = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          requests: [
+            {
+              addSheet: {
+                properties: {
+                  title: 'Deudas',
+                  gridProperties: { frozenRowCount: 1 },
+                },
+              },
+            },
+          ],
+        }),
+      }
+    );
+
+    if (!addRes.ok) return;
+
+    const headerData = [
+      {
+        range: 'Deudas!A1:M1',
+        values: [
+          [
+            'ID',
+            'Nombre',
+            'Tipo',
+            'Categoría',
+            'MontoTotal',
+            'MontoCuota',
+            'CuotasTotales',
+            'CuotasPagadas',
+            'DiaVencimiento',
+            'TasaAnual',
+            'Estado',
+            'FechaInicio',
+            'Notas',
+          ],
+        ],
+      },
+    ];
+
+    await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchUpdate`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          valueInputOption: 'USER_ENTERED',
+          data: headerData,
+        }),
+      }
+    );
+  } catch (err) {
+    console.warn('[GoogleDirectService] Error asegurando pestaña Deudas:', err);
   }
 }
 
@@ -557,11 +649,13 @@ export async function readAllFromGoogleSheetsDirect(
   savings: SavingsGoal[];
   scheduledExpenses?: ScheduledExpense[];
   scheduledIncomes?: ScheduledIncome[];
+  debts?: Debt[];
   config: Partial<AppConfig>;
 }> {
   // Intentar asegurar que las pestañas existan si tenemos permisos de edición
   await ensureIncomeSheetExists(accessToken, spreadsheetId).catch(() => {});
   await ensureScheduledSheetsExists(accessToken, spreadsheetId).catch(() => {});
+  await ensureDebtsSheetExists(accessToken, spreadsheetId).catch(() => {});
 
   // 1. Obtener la metadata de las pestañas que realmente existen en el documento
   let sheetTitles: string[] = ['Gastos', 'Ingresos', 'Inversiones', 'Ahorros', 'Configuracion'];
@@ -585,6 +679,7 @@ export async function readAllFromGoogleSheetsDirect(
   const hasIngresos = sheetTitles.some((t) => t.toLowerCase() === 'ingresos');
   const hasGastosProg = sheetTitles.some((t) => t.toLowerCase() === 'gastosprogramados');
   const hasIngresosProg = sheetTitles.some((t) => t.toLowerCase() === 'ingresosprogramados');
+  const hasDeudas = sheetTitles.some((t) => t.toLowerCase() === 'deudas');
 
   const rangesToFetch: { key: string; range: string }[] = [];
   if (hasGastos) rangesToFetch.push({ key: 'gastos', range: 'Gastos!A2:I' });
@@ -594,6 +689,7 @@ export async function readAllFromGoogleSheetsDirect(
   if (hasIngresos) rangesToFetch.push({ key: 'ingresos', range: 'Ingresos!A2:G' });
   if (hasGastosProg) rangesToFetch.push({ key: 'gastosprogramados', range: 'GastosProgramados!A2:J' });
   if (hasIngresosProg) rangesToFetch.push({ key: 'ingresosprogramados', range: 'IngresosProgramados!A2:H' });
+  if (hasDeudas) rangesToFetch.push({ key: 'deudas', range: 'Deudas!A2:M' });
 
   if (rangesToFetch.length === 0) {
     return {
@@ -603,6 +699,7 @@ export async function readAllFromGoogleSheetsDirect(
       savings: [],
       scheduledExpenses: [],
       scheduledIncomes: [],
+      debts: [],
       config: {},
     };
   }
@@ -741,6 +838,30 @@ export async function readAllFromGoogleSheetsDirect(
       notifyDaysBefore: 1,
     }));
 
+  // 8. Deudas
+  const deudasRows = getRowsForKey('deudas');
+  const debts: Debt[] = deudasRows
+    .filter((row: any[]) => row && (row[0] || row[1]))
+    .map((row: any[]) => ({
+      id: String(row[0] || Math.random().toString(36).substring(2, 9)),
+      name: String(row[1] || 'Deuda'),
+      type: (String(row[2] || '').toLowerCase() === 'a_cobrar' ? 'a_cobrar' : 'a_pagar') as any,
+      category: String(row[3] || 'Tarjeta de Crédito'),
+      totalAmount: parseFloat(String(row[4]).replace(/[^0-9.-]+/g, '')) || 0,
+      installmentAmount: parseFloat(String(row[5]).replace(/[^0-9.-]+/g, '')) || 0,
+      totalInstallments: parseInt(String(row[6] || '1'), 10) || 1,
+      paidInstallments: parseInt(String(row[7] || '0'), 10) || 0,
+      dueDayOfMonth: row[8] ? parseInt(String(row[8]), 10) : undefined,
+      interestRateAnnual: row[9] ? parseFloat(String(row[9])) : undefined,
+      status: (String(row[10] || '').toLowerCase() === 'saldada'
+        ? 'saldada'
+        : String(row[10] || '').toLowerCase() === 'renegociada'
+        ? 'renegociada'
+        : 'activa') as any,
+      startDate: String(row[11] || ''),
+      notes: String(row[12] || ''),
+    }));
+
   return {
     expenses,
     incomes,
@@ -748,10 +869,13 @@ export async function readAllFromGoogleSheetsDirect(
     savings,
     scheduledExpenses,
     scheduledIncomes,
+    debts,
     config: {
       monthlyIncome: parseFloat(String(configMap['IngresoMensual'] || '0')) || 0,
       currency: configMap['Moneda'] || '$',
       emergencyFundMinimum: parseFloat(String(configMap['FondoEmergenciaMinimo'] || '0')) || 0,
+      debtRepaymentBudget: parseFloat(String(configMap['PresupuestoDeudas'] || '0')) || undefined,
+      debtRepaymentPercent: parseFloat(String(configMap['PorcentajeDeudas'] || '0')) || undefined,
       telegramBotToken: configMap['TelegramToken'] || '',
       telegramChatId: configMap['TelegramChatId'] || '',
     },
@@ -770,6 +894,8 @@ export async function updateConfigDirect(
   if (config.monthlyIncome !== undefined) rows.push(['IngresoMensual', String(config.monthlyIncome)]);
   if (config.currency !== undefined) rows.push(['Moneda', String(config.currency)]);
   if (config.emergencyFundMinimum !== undefined) rows.push(['FondoEmergenciaMinimo', String(config.emergencyFundMinimum)]);
+  if (config.debtRepaymentBudget !== undefined) rows.push(['PresupuestoDeudas', String(config.debtRepaymentBudget)]);
+  if (config.debtRepaymentPercent !== undefined) rows.push(['PorcentajeDeudas', String(config.debtRepaymentPercent)]);
   if (config.telegramBotToken !== undefined) rows.push(['TelegramToken', String(config.telegramBotToken)]);
   if (config.telegramChatId !== undefined) rows.push(['TelegramChatId', String(config.telegramChatId)]);
 
@@ -1092,6 +1218,50 @@ export async function appendScheduledIncomeDirect(
     }
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error?.message || 'Error al guardar ingreso programado en Google Sheets');
+  }
+}
+
+/**
+ * Agrega o actualiza una deuda o financiación en cuotas directamente a Google Sheets
+ */
+export async function appendDebtDirect(
+  accessToken: string,
+  spreadsheetId: string,
+  debt: Debt
+): Promise<void> {
+  await ensureDebtsSheetExists(accessToken, spreadsheetId).catch(() => {});
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Deudas!A:M:append?valueInputOption=USER_ENTERED`;
+  const row = [
+    debt.id,
+    debt.name,
+    debt.type,
+    debt.category,
+    debt.totalAmount,
+    debt.installmentAmount,
+    debt.totalInstallments,
+    debt.paidInstallments,
+    debt.dueDayOfMonth || '',
+    debt.interestRateAnnual || 0,
+    debt.status,
+    debt.startDate || '',
+    debt.notes || '',
+  ];
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ values: [row] }),
+  });
+
+  if (!res.ok) {
+    if (res.status === 403) {
+      throw new Error('Permiso denegado: tu cuenta de Google tiene rol de Lector. Solicita rol de Editor para registrar deudas.');
+    }
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error?.message || 'Error al guardar deuda en Google Sheets');
   }
 }
 
