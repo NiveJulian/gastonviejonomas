@@ -107,3 +107,22 @@ export function getCurrentYearMonth(): string {
   const month = String(now.getMonth() + 1).padStart(2, '0');
   return `${year}-${month}`;
 }
+
+/**
+ * Extrae el ID de una hoja de cálculo a partir de un ID directo o de una URL de Google Sheets
+ */
+export function extractSpreadsheetId(input: string): string {
+  if (!input) return '';
+  const trimmed = input.trim();
+  // Formato URL: https://docs.google.com/spreadsheets/d/{ID}/edit...
+  const match = trimmed.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+  if (match && match[1]) {
+    return match[1];
+  }
+  // Si es un ID alfanumérico directo de Google Drive (típicamente 25-45 caracteres)
+  const cleanId = trimmed.split('/')[0].split('?')[0].split('#')[0];
+  if (/^[a-zA-Z0-9-_]{20,}$/.test(cleanId)) {
+    return cleanId;
+  }
+  return cleanId;
+}

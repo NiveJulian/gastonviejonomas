@@ -1,4 +1,5 @@
 import type { Expense, Income, Investment, SavingsGoal, AppConfig, DrivePermission } from '../types/finance';
+import { extractSpreadsheetId } from '../utils/helpers';
 
 const SPREADSHEET_NAME = 'FinanzaHogar - Mis Finanzas';
 const DRIVE_FOLDER_NAME = 'Comprobantes Finanzas';
@@ -142,42 +143,130 @@ export async function findOrCreateDriveFolder(accessToken: string): Promise<stri
 }
 
 /**
- * Busca si ya existe la hoja de Finanzas o la crea automáticamente con todas las tablas
+ * Valida y conecta una hoja de Google Sheets existente (compartida o propia)
+ */
+export async function connectExistingSpreadsheet(
+  accessToken: string,
+  inputUrlOrId: string
+): Promise<{ spreadsheetId: string; title: string }> {
+  const spreadsheetId = extractSpreadsheetId(inputUrlOrId);
+  if (!spreadsheetId) {
+    throw new Error('El ID o enlace de la hoja de Google Sheets no es válido.');
+  }
+
+  // 1. Verificar acceso directo con la API de Sheets
+  const res = await fetch(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=spreadsheetId,properties(title),sheets.properties(sheetId,title)`,
+    {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    }
+  );
+
+  if (!res.ok) {
+    if (res.status === 403 || res.status === 401) {
+      throw new Error(
+        'No tienes permiso para acceder a esta hoja. Pídele al propietario que comparta la hoja con tu correo de Google.'
+      );
+    }
+    if (res.status === 404) {
+      throw new Error('La hoja de cálculo no fue encontrada en Google Drive.');
+    }
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error?.message || 'Error al conectar con la hoja de Google Sheets.');
+  }
+
+  const data = await res.json();
+  const title = data.properties?.title || SPREADSHEET_NAME;
+
+  // 2. Asegurar que la pestaña Ingresos exista
+  await ensureIncomeSheetExists(accessToken, spreadsheetId);
+
+  return { spreadsheetId, title };
+}
+
+/**
+ * Busca si ya existe la hoja de Finanzas (propia o compartida) o la crea automáticamente con todas las tablas
  */
 export async function findOrCreateSpreadsheet(
   accessToken: string,
   storedSpreadsheetId?: string
 ): Promise<{ spreadsheetId: string; isNew: boolean }> {
-  // 1. Si ya teníamos un ID guardado, verificar si sigue existiendo
+  // 1. Si ya teníamos un ID guardado o compartido, verificar vía Sheets API
   if (storedSpreadsheetId) {
-    const checkRes = await fetch(
-      `https://www.googleapis.com/drive/v3/files/${storedSpreadsheetId}?fields=id,name,trashed`,
-      { headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-    if (checkRes.ok) {
-      const data = await checkRes.json();
-      if (!data.trashed) {
-        await ensureIncomeSheetExists(accessToken, storedSpreadsheetId);
-        return { spreadsheetId: storedSpreadsheetId, isNew: false };
+    const cleanId = extractSpreadsheetId(storedSpreadsheetId);
+    if (cleanId) {
+      try {
+        const checkRes = await fetch(
+          `https://sheets.googleapis.com/v4/spreadsheets/${cleanId}?fields=spreadsheetId,properties(title)`,
+          { headers: { Authorization: `Bearer ${accessToken}` } }
+        );
+        if (checkRes.ok) {
+          const sheetData = await checkRes.json();
+          if (sheetData.spreadsheetId) {
+            await ensureIncomeSheetExists(accessToken, cleanId);
+            return { spreadsheetId: cleanId, isNew: false };
+          }
+        }
+      } catch (err) {
+        console.warn('[GoogleDirectService] Error verificando hoja guardada vía Sheets API:', err);
       }
     }
   }
 
-  // 2. Buscar en Google Drive por nombre exacto
-  const query = encodeURIComponent(`name = '${SPREADSHEET_NAME}' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false`);
-  const searchUrl = `https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name)`;
+  // 2. Buscar en Google Drive:
+  // 2A. En archivos propios del usuario
+  // 2B. En archivos compartidos con el usuario (sharedWithMe = true)
+  const driveParams = '&supportsAllDrives=true&includeItemsFromAllDrives=true&fields=files(id,name,sharedWithMe)';
 
-  const searchRes = await fetch(searchUrl, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
+  try {
+    // 2A. Archivos propios
+    const ownedQuery = encodeURIComponent(
+      `name = '${SPREADSHEET_NAME}' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false`
+    );
+    const ownedRes = await fetch(
+      `https://www.googleapis.com/drive/v3/files?q=${ownedQuery}${driveParams}`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
 
-  if (searchRes.ok) {
-    const data = await searchRes.json();
-    if (data.files && data.files.length > 0) {
-      const foundId = data.files[0].id;
-      await ensureIncomeSheetExists(accessToken, foundId);
-      return { spreadsheetId: foundId, isNew: false };
+    if (ownedRes.ok) {
+      const ownedData = await ownedRes.json();
+      if (ownedData.files && ownedData.files.length > 0) {
+        const foundId = ownedData.files[0].id;
+        await ensureIncomeSheetExists(accessToken, foundId);
+        return { spreadsheetId: foundId, isNew: false };
+      }
     }
+
+    // 2B. Archivos compartidos con el usuario
+    const sharedQuery = encodeURIComponent(
+      `sharedWithMe = true and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false`
+    );
+    const sharedRes = await fetch(
+      `https://www.googleapis.com/drive/v3/files?q=${sharedQuery}${driveParams}`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+
+    if (sharedRes.ok) {
+      const sharedData = await sharedRes.json();
+      const files: any[] = sharedData.files || [];
+      let sharedMatch = files.find((f) => f.name === SPREADSHEET_NAME);
+      if (!sharedMatch) {
+        sharedMatch = files.find(
+          (f) =>
+            f.name &&
+            (f.name.toLowerCase().includes('finanza') ||
+              f.name.toLowerCase().includes('gaston') ||
+              f.name.toLowerCase().includes('gastos'))
+        );
+      }
+
+      if (sharedMatch && sharedMatch.id) {
+        await ensureIncomeSheetExists(accessToken, sharedMatch.id);
+        return { spreadsheetId: sharedMatch.id, isNew: false };
+      }
+    }
+  } catch (err) {
+    console.warn('[GoogleDirectService] Error buscando hojas en Drive:', err);
   }
 
   // 3. Crear hoja de cálculo nueva con todas las tablas formateadas
@@ -337,18 +426,49 @@ export async function readAllFromGoogleSheetsDirect(
   savings: SavingsGoal[];
   config: Partial<AppConfig>;
 }> {
-  // Asegurar que la pestaña Ingresos exista si la hoja proviene de una versión previa
-  await ensureIncomeSheetExists(accessToken, spreadsheetId);
+  // Intentar asegurar que la pestaña Ingresos exista si tenemos permisos de edición
+  await ensureIncomeSheetExists(accessToken, spreadsheetId).catch(() => {});
 
-  const ranges = [
-    'Gastos!A2:I',
-    'Inversiones!A2:H',
-    'Ahorros!A2:G',
-    'Configuracion!A2:B',
-    'Ingresos!A2:G',
-  ];
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchGet?${ranges
-    .map((r) => `ranges=${encodeURIComponent(r)}`)
+  // 1. Obtener la metadata de las pestañas que realmente existen en el documento
+  let sheetTitles: string[] = ['Gastos', 'Ingresos', 'Inversiones', 'Ahorros', 'Configuracion'];
+  try {
+    const metaRes = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties.title`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    if (metaRes.ok) {
+      const metaData = await metaRes.json();
+      sheetTitles = (metaData.sheets || []).map((s: any) => s.properties?.title).filter(Boolean);
+    }
+  } catch (e) {
+    console.warn('[GoogleDirectService] Error leyendo títulos de pestañas:', e);
+  }
+
+  const hasGastos = sheetTitles.some((t) => t.toLowerCase() === 'gastos');
+  const hasInversiones = sheetTitles.some((t) => t.toLowerCase() === 'inversiones');
+  const hasAhorros = sheetTitles.some((t) => t.toLowerCase() === 'ahorros');
+  const hasConfiguracion = sheetTitles.some((t) => t.toLowerCase() === 'configuracion');
+  const hasIngresos = sheetTitles.some((t) => t.toLowerCase() === 'ingresos');
+
+  const rangesToFetch: { key: string; range: string }[] = [];
+  if (hasGastos) rangesToFetch.push({ key: 'gastos', range: 'Gastos!A2:I' });
+  if (hasInversiones) rangesToFetch.push({ key: 'inversiones', range: 'Inversiones!A2:H' });
+  if (hasAhorros) rangesToFetch.push({ key: 'ahorros', range: 'Ahorros!A2:G' });
+  if (hasConfiguracion) rangesToFetch.push({ key: 'configuracion', range: 'Configuracion!A2:B' });
+  if (hasIngresos) rangesToFetch.push({ key: 'ingresos', range: 'Ingresos!A2:G' });
+
+  if (rangesToFetch.length === 0) {
+    return {
+      expenses: [],
+      incomes: [],
+      investments: [],
+      savings: [],
+      config: {},
+    };
+  }
+
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchGet?${rangesToFetch
+    .map((r) => `ranges=${encodeURIComponent(r.range)}`)
     .join('&')}`;
 
   const res = await fetch(url, {
@@ -356,15 +476,23 @@ export async function readAllFromGoogleSheetsDirect(
   });
 
   if (!res.ok) {
-    const err = await res.json();
+    const err = await res.json().catch(() => ({}));
+    if (res.status === 403) {
+      throw new Error('No tienes permiso para ver esta hoja. Solicita al dueño que la comparta con tu cuenta.');
+    }
     throw new Error(err.error?.message || 'Error al leer datos de Google Sheets');
   }
 
   const data = await res.json();
   const valueRanges = data.valueRanges || [];
 
+  const getRowsForKey = (key: string) => {
+    const idx = rangesToFetch.findIndex((r) => r.key === key);
+    return idx !== -1 ? valueRanges[idx]?.values || [] : [];
+  };
+
   // 1. Gastos
-  const expensesRows = valueRanges[0]?.values || [];
+  const expensesRows = getRowsForKey('gastos');
   const expenses: Expense[] = expensesRows
     .filter((row: any[]) => row && (row[0] || row[1] || row[2]))
     .map((row: any[]) => ({
@@ -380,7 +508,7 @@ export async function readAllFromGoogleSheetsDirect(
     }));
 
   // 2. Inversiones
-  const invRows = valueRanges[1]?.values || [];
+  const invRows = getRowsForKey('inversiones');
   const investments: Investment[] = invRows
     .filter((row: any[]) => row && (row[0] || row[1] || row[2]))
     .map((row: any[]) => ({
@@ -395,7 +523,7 @@ export async function readAllFromGoogleSheetsDirect(
     }));
 
   // 3. Ahorros
-  const savingsRows = valueRanges[2]?.values || [];
+  const savingsRows = getRowsForKey('ahorros');
   const savings: SavingsGoal[] = savingsRows
     .filter((row: any[]) => row && (row[0] || row[1]))
     .map((row: any[]) => ({
@@ -409,7 +537,7 @@ export async function readAllFromGoogleSheetsDirect(
     }));
 
   // 4. Configuración
-  const configRows = valueRanges[3]?.values || [];
+  const configRows = getRowsForKey('configuracion');
   const configMap: Record<string, any> = {};
   configRows.forEach((row: any[]) => {
     if (row && row[0]) {
@@ -418,7 +546,7 @@ export async function readAllFromGoogleSheetsDirect(
   });
 
   // 5. Ingresos
-  const incomesRows = valueRanges[4]?.values || [];
+  const incomesRows = getRowsForKey('ingresos');
   const incomes: Income[] = incomesRows
     .filter((row: any[]) => row && (row[0] || row[1] || row[2]))
     .map((row: any[]) => ({
@@ -462,7 +590,7 @@ export async function updateConfigDirect(
   if (config.telegramChatId !== undefined) rows.push(['TelegramChatId', String(config.telegramChatId)]);
 
   const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Configuracion!A1:B${rows.length}?valueInputOption=USER_ENTERED`;
-  await fetch(url, {
+  const res = await fetch(url, {
     method: 'PUT',
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -470,6 +598,14 @@ export async function updateConfigDirect(
     },
     body: JSON.stringify({ values: rows }),
   });
+
+  if (!res.ok) {
+    if (res.status === 403) {
+      throw new Error('Permiso denegado: tu cuenta de Google tiene rol de Lector. Solicita rol de Editor al propietario para guardar configuración.');
+    }
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error?.message || 'Error al actualizar configuración en Google Sheets');
+  }
 }
 
 /**
@@ -494,7 +630,7 @@ export async function appendExpenseDirect(
     expense.notes || '',
   ];
 
-  await fetch(url, {
+  const res = await fetch(url, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -502,6 +638,14 @@ export async function appendExpenseDirect(
     },
     body: JSON.stringify({ values: [row] }),
   });
+
+  if (!res.ok) {
+    if (res.status === 403) {
+      throw new Error('Permiso denegado: tu cuenta de Google tiene rol de Lector. Solicita rol de Editor al propietario para registrar gastos.');
+    }
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error?.message || 'Error al guardar gasto en Google Sheets');
+  }
 }
 
 /**
@@ -512,7 +656,7 @@ export async function appendIncomeDirect(
   spreadsheetId: string,
   income: Income
 ): Promise<void> {
-  await ensureIncomeSheetExists(accessToken, spreadsheetId);
+  await ensureIncomeSheetExists(accessToken, spreadsheetId).catch(() => {});
   const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Ingresos!A:G:append?valueInputOption=USER_ENTERED`;
   const row = [
     income.id,
@@ -524,7 +668,7 @@ export async function appendIncomeDirect(
     income.notes || '',
   ];
 
-  await fetch(url, {
+  const res = await fetch(url, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -532,6 +676,14 @@ export async function appendIncomeDirect(
     },
     body: JSON.stringify({ values: [row] }),
   });
+
+  if (!res.ok) {
+    if (res.status === 403) {
+      throw new Error('Permiso denegado: tu cuenta de Google tiene rol de Lector. Solicita rol de Editor al propietario para registrar ingresos.');
+    }
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error?.message || 'Error al guardar ingreso en Google Sheets');
+  }
 }
 
 /**
@@ -570,7 +722,7 @@ export async function deleteRowDirect(
 
     if (rowIndex === -1) return;
 
-    await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`, {
+    const batchRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -591,8 +743,16 @@ export async function deleteRowDirect(
         ],
       }),
     });
-  } catch (err) {
+    if (!batchRes.ok) {
+      if (batchRes.status === 403) {
+        throw new Error('Permiso denegado: tu cuenta de Google tiene rol de Lector. Solicita rol de Editor al propietario para eliminar registros.');
+      }
+      const err = await batchRes.json().catch(() => ({}));
+      throw new Error(err.error?.message || 'Error al eliminar fila en Google Sheets');
+    }
+  } catch (err: any) {
     console.warn(`[GoogleDirectService] Error eliminando fila ${id} de ${sheetTitle}:`, err);
+    throw err;
   }
 }
 
@@ -616,7 +776,7 @@ export async function appendInvestmentDirect(
     investment.notes || '',
   ];
 
-  await fetch(url, {
+  const res = await fetch(url, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -624,6 +784,14 @@ export async function appendInvestmentDirect(
     },
     body: JSON.stringify({ values: [row] }),
   });
+
+  if (!res.ok) {
+    if (res.status === 403) {
+      throw new Error('Permiso denegado: tu cuenta de Google tiene rol de Lector. Solicita rol de Editor al propietario para registrar inversiones.');
+    }
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error?.message || 'Error al guardar inversión en Google Sheets');
+  }
 }
 
 /**
@@ -645,7 +813,7 @@ export async function appendSavingsDirect(
     goal.notes || '',
   ];
 
-  await fetch(url, {
+  const res = await fetch(url, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -653,6 +821,14 @@ export async function appendSavingsDirect(
     },
     body: JSON.stringify({ values: [row] }),
   });
+
+  if (!res.ok) {
+    if (res.status === 403) {
+      throw new Error('Permiso denegado: tu cuenta de Google tiene rol de Lector. Solicita rol de Editor al propietario para registrar ahorros.');
+    }
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error?.message || 'Error al guardar meta de ahorro en Google Sheets');
+  }
 }
 
 /**

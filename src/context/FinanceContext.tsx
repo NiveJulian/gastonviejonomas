@@ -18,6 +18,7 @@ import {
 import {
   findOrCreateSpreadsheet,
   findOrCreateDriveFolder,
+  connectExistingSpreadsheet,
   readAllFromGoogleSheetsDirect,
   appendExpenseDirect,
   appendIncomeDirect,
@@ -28,7 +29,7 @@ import {
   uploadReceiptToDriveDirect,
   updateConfigDirect,
 } from '../services/googleDirectService';
-import { generateId, getCurrentYearMonth } from '../utils/helpers';
+import { generateId, getCurrentYearMonth, extractSpreadsheetId } from '../utils/helpers';
 import { startBrowserTelegramBot, stopBrowserTelegramBot } from '../services/browserTelegramBot';
 import { askFinancialAdvisor } from '../services/geminiService';
 import { processAgentInstruction } from '../services/agentEngine';
@@ -45,6 +46,7 @@ interface FinanceContextType {
   loginWithGoogle: () => Promise<boolean>;
   logoutGoogle: () => void;
   syncDirectWithGoogle: () => Promise<boolean>;
+  connectSharedSpreadsheet: (urlOrId: string) => Promise<{ success: boolean; message: string }>;
   addExpense: (
     expense: Omit<Expense, 'id'>,
     receiptBase64?: string,
@@ -74,6 +76,7 @@ interface FinanceContextType {
 const FinanceContext = createContext<FinanceContextType | undefined>(undefined);
 
 const STORAGE_KEY = 'finanzahogar_data_clean_v1';
+const PENDING_SHEET_KEY = 'gaston_pending_shared_sheet_id';
 
 // Limpieza de datos mock anteriores en localStorage
 try {
@@ -149,6 +152,26 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [syncError, setSyncError] = useState<string | null>(null);
 
+  // 1. Detectar si el usuario abrió un enlace de invitación con ?sheetId=... o ?spreadsheetId=...
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const sheetIdParam =
+        params.get('sheetId') || params.get('sheet_id') || params.get('spreadsheetId');
+      if (sheetIdParam) {
+        const cleanId = extractSpreadsheetId(sheetIdParam);
+        if (cleanId) {
+          localStorage.setItem(PENDING_SHEET_KEY, cleanId);
+          // Limpiar la URL sin recargar para mantener interfaz prolija
+          const cleanUrl = window.location.pathname + window.location.hash;
+          window.history.replaceState({}, document.title, cleanUrl);
+        }
+      }
+    } catch (err) {
+      console.warn('Error leyendo parámetros de hoja compartida de la URL:', err);
+    }
+  }, []);
+
   // Guardar en localStorage ante cualquier cambio
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY + '_expenses', JSON.stringify(expenses));
@@ -173,10 +196,43 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
   // Si hay sesión guardada al iniciar, sincronizar datos existentes en background
   useEffect(() => {
     const session = getStoredGoogleSession();
-    if (session && config.googleSpreadsheetId) {
-      syncDirectWithGoogle(session.accessToken, config.googleSpreadsheetId);
+    const pendingId = localStorage.getItem(PENDING_SHEET_KEY);
+    const targetId = pendingId || config.googleSpreadsheetId;
+    if (session && targetId) {
+      syncDirectWithGoogle(session.accessToken, targetId).then((success) => {
+        if (success && pendingId) {
+          localStorage.removeItem(PENDING_SHEET_KEY);
+        }
+      });
     }
   }, []);
+
+  // Sincronización automática colaborativa en segundo plano cuando la pestaña vuelve a tener foco
+  useEffect(() => {
+    let lastAutoSync = 0;
+    const handleFocusSync = () => {
+      if (document.visibilityState === 'visible') {
+        const now = Date.now();
+        // Máximo una sincronización automática cada 15 segundos
+        if (now - lastAutoSync > 15000) {
+          const session = getStoredGoogleSession();
+          const targetSheet = config.googleSpreadsheetId;
+          if (session && targetSheet) {
+            lastAutoSync = now;
+            syncDirectWithGoogle(session.accessToken, targetSheet);
+          }
+        }
+      }
+    };
+
+    window.addEventListener('focus', handleFocusSync);
+    document.addEventListener('visibilitychange', handleFocusSync);
+
+    return () => {
+      window.removeEventListener('focus', handleFocusSync);
+      document.removeEventListener('visibilitychange', handleFocusSync);
+    };
+  }, [config.googleSpreadsheetId]);
 
   /**
    * Sincronización directa con Google Sheets API (sin backend ni intermediarios)
@@ -233,6 +289,63 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
   };
 
   /**
+   * Conectar una hoja de cálculo compartida directamente por URL o Spreadsheet ID
+   */
+  const connectSharedSpreadsheet = async (
+    urlOrId: string
+  ): Promise<{ success: boolean; message: string }> => {
+    const cleanId = extractSpreadsheetId(urlOrId);
+    if (!cleanId) {
+      return { success: false, message: 'El enlace o ID de Google Sheets proporcionado no es válido.' };
+    }
+
+    const session = googleUser || getStoredGoogleSession();
+    if (!session?.accessToken) {
+      localStorage.setItem(PENDING_SHEET_KEY, cleanId);
+      return {
+        success: false,
+        message: 'ID guardado. Inicia sesión con tu cuenta de Google arriba para acceder a la hoja compartida.',
+      };
+    }
+
+    setIsSyncing(true);
+    setSyncError(null);
+
+    try {
+      const { spreadsheetId, title } = await connectExistingSpreadsheet(session.accessToken, cleanId);
+      localStorage.removeItem(PENDING_SHEET_KEY);
+
+      setConfig((prev) => ({
+        ...prev,
+        googleSpreadsheetId: spreadsheetId,
+        lastSync: new Date().toLocaleTimeString(),
+      }));
+
+      const ok = await syncDirectWithGoogle(session.accessToken, spreadsheetId);
+      setIsSyncing(false);
+
+      if (ok) {
+        return {
+          success: true,
+          message: `¡Conectado exitosamente a "${title}"! Los datos compartidos se han sincronizado.`,
+        };
+      } else {
+        return {
+          success: false,
+          message: 'Se vinculó la hoja pero hubo un problema al sincronizar las tablas.',
+        };
+      }
+    } catch (err: any) {
+      setIsSyncing(false);
+      setSyncError(err.message || 'Error vinculando hoja compartida');
+      return {
+        success: false,
+        message: err.message || 'No se pudo conectar con la hoja compartida.',
+      };
+    }
+  };
+
+  /**
    * Iniciar sesión con Google, detectar/crear la hoja y persistir sesión en localStorage
    */
   const loginWithGoogle = async (): Promise<boolean> => {
@@ -246,11 +359,19 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
       // 1. Buscar o crear carpeta de comprobantes en Google Drive
       const folderId = await findOrCreateDriveFolder(user.accessToken);
 
-      // 2. Buscar si ya existe la hoja o crearla respetando datos
+      // 2. Si había una hoja compartida pendiente o ya vinculada, buscarla primero
+      const pendingSheetId = localStorage.getItem(PENDING_SHEET_KEY);
+      const preferredSheetId = pendingSheetId || config.googleSpreadsheetId;
+
+      // 3. Buscar si ya existe la hoja o crearla respetando datos
       const { spreadsheetId, isNew } = await findOrCreateSpreadsheet(
         user.accessToken,
-        config.googleSpreadsheetId
+        preferredSheetId
       );
+
+      if (pendingSheetId) {
+        localStorage.removeItem(PENDING_SHEET_KEY);
+      }
 
       // Asegurar que la pestaña Ingresos exista
       await ensureIncomeSheetExists(user.accessToken, spreadsheetId);
@@ -791,6 +912,7 @@ export const FinanceProvider: React.FC<{ children: ReactNode }> = ({ children })
         loginWithGoogle,
         logoutGoogle,
         syncDirectWithGoogle,
+        connectSharedSpreadsheet,
         addExpense,
         updateExpense,
         deleteExpense,

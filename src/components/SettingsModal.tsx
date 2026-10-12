@@ -22,6 +22,7 @@ import {
   Smartphone,
   CheckCircle,
   Trash2,
+  Link2,
 } from 'lucide-react';
 import { useFinance } from '../context/FinanceContext';
 import {
@@ -53,6 +54,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     loginWithGoogle,
     logoutGoogle,
     syncDirectWithGoogle,
+    connectSharedSpreadsheet,
     telegramBotStatus,
     telegramBotError,
     connectTelegramBot,
@@ -102,6 +104,28 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [importStatus, setImportStatus] = useState<string | null>(null);
+
+  // Vincular hoja compartida manualmente
+  const [customSpreadsheetInput, setCustomSpreadsheetInput] = useState('');
+  const [isLinkingSheet, setIsLinkingSheet] = useState(false);
+  const [linkSheetResult, setLinkSheetResult] = useState<{ text: string; error?: boolean } | null>(null);
+
+  const handleLinkCustomSheet = async () => {
+    if (!customSpreadsheetInput.trim()) return;
+    setIsLinkingSheet(true);
+    setLinkSheetResult(null);
+    try {
+      const res = await connectSharedSpreadsheet(customSpreadsheetInput.trim());
+      setLinkSheetResult({ text: res.message, error: !res.success });
+      if (res.success) {
+        setCustomSpreadsheetInput('');
+      }
+    } catch (err: any) {
+      setLinkSheetResult({ text: err.message || 'Error vinculando hoja', error: true });
+    } finally {
+      setIsLinkingSheet(false);
+    }
+  };
 
   if (!isOpen) return null;
 
@@ -523,6 +547,49 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </button>
                 </div>
               )}
+
+              {/* Hoja de Google Sheets Activa y Vincular Hoja Compartida */}
+              <div className="pt-2 border-t border-slate-100 space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="block text-[11px] font-semibold text-slate-700">
+                    Hoja de Google Sheets Vinculada:
+                  </label>
+                  {config.googleSpreadsheetId && (
+                    <span className="text-[10px] text-slate-400 font-mono truncate max-w-[200px]" title={config.googleSpreadsheetId}>
+                      {config.googleSpreadsheetId}
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <input
+                    type="text"
+                    placeholder="Pegar enlace o ID de hoja compartida..."
+                    value={customSpreadsheetInput}
+                    onChange={(e) => setCustomSpreadsheetInput(e.target.value)}
+                    className="flex-1 px-3 py-1.5 text-xs rounded-lg border border-slate-200 focus:border-emerald-500 outline-none font-mono"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleLinkCustomSheet}
+                    disabled={isLinkingSheet || !customSpreadsheetInput.trim()}
+                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-900 disabled:opacity-50 text-white font-semibold text-xs rounded-lg transition-colors flex items-center justify-center gap-1.5 shrink-0"
+                  >
+                    <Link2 className="w-3.5 h-3.5" />
+                    <span>{isLinkingSheet ? 'Vinculando...' : 'Vincular Hoja'}</span>
+                  </button>
+                </div>
+
+                {linkSheetResult && (
+                  <p
+                    className={`text-[11px] font-medium ${
+                      linkSheetResult.error ? 'text-rose-600' : 'text-emerald-600'
+                    }`}
+                  >
+                    {linkSheetResult.text}
+                  </p>
+                )}
+              </div>
 
               {/* Client ID opcional */}
               <div className="pt-2 border-t border-slate-100">
